@@ -21,5 +21,5 @@ colcon test-result --verbose
 ```
 
 The normative API, validation, real-time boundary, and change-control rules
-live in `wiki/Implementation/Model API Contract.md` in the integration
+live in `wiki/implementation/model_api_contract.md` in the integration
 workspace.
