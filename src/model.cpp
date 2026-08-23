@@ -85,6 +85,39 @@ constexpr double kArmLinkX = -0.3925 + 0.274489;   // a_3 + p_S4x
 constexpr double kArmLinkY = -0.468;               // -p_S4z
 constexpr double kArmLateralOffset = 0.224 - 0.224;  // p_S4y - p_S3z
 
+// 7040 jaw four-bar, wiki/hydraulics.md §2.6. §6.2 carries none of its numbers,
+// so every constant below is ported from the deployed model under src/ and
+// names the file it came from. None of them is a §6.2 value.
+//
+// The fitted mirror law phi_sim,9(q8), which §2.6 says is the variant the
+// deployed model uses, in the Horner form of
+// timber_crane_model_cpp/include/timber_crane_model_cpp/maple/
+// comp_eq_four_bar.hpp:7, with jaw_linkage_p of
+// crane_tools_description/7040/config/gripper_parameter.yaml:13.
+constexpr double kJawMirrorQuadratic = -0.121220;  // p_0
+constexpr double kJawMirrorLinear = 1.400122;      // p_1
+constexpr double kJawMirrorConstant = -0.227867;   // p_2
+
+// The two jaw pivots on the pincer frame and the two jaw arm lengths. The
+// deployed model reads them from the URDF DH transforms in
+// timber_crane_parameter/src/parameter_def.cpp:196-206; the joint origins are
+// in crane_tools_description/7040/urdf/links/. Note a_9 and a_11 are the y and
+// a_10 and a_12 the x coordinate of their origin, per the comment there.
+constexpr double kOuterJawPivotOffset = 0.328;  // a_9, -dh_trans9 y
+constexpr double kOuterJawArmLength = 0.8126;   // a_10, dh_trans10 x
+constexpr double kInnerJawPivotOffset = 0.336;  // a_11, dh_trans11 y
+constexpr double kInnerJawArmLength = 0.8172;   // a_12, dh_trans12 x
+
+// The jaw cylinder's two attachment points. The barrel end sits on the outer
+// jaw, joint pincer_cylinder_mounting_outer_jaw_joint of crane_tools_description
+// /7040/urdf/joints/hydraulic/gripper_cylinder_joints.urdf.xacro:15. The rod end
+// sits on the inner jaw and is hard-coded in gripper_parameter.yaml:5-7 because
+// the URDF closes that loop only in Gazebo.
+constexpr double kJawCylinderOuterX = -0.8971;    // p_S7x
+constexpr double kJawCylinderOuterY = 0.01754;    // p_S7y
+constexpr double kJawCylinderInnerX = -0.908397;  // p_S8x
+constexpr double kJawCylinderInnerY = 0.015289;   // p_S8y
+
 // Effective areas per axis. a_a and a_b are the force-producing areas of §4,
 // a_eff_pos and a_eff_neg the direction-dependent pump draw of §3. The rotator
 // carries V_m in all four, in m^3/rad.
@@ -230,20 +263,48 @@ CylinderStroke arm_stroke(double q3)
   return CylinderStroke{stroke, in_plane.dot(in_plane_rate) / stroke, true};
 }
 
+// wiki/hydraulics.md §2.6 for the 7040, composed the way the deployed model
+// composes it. The commanded outer-jaw angle q8 drives the inner jaw through
+// the quadratic fit phi_sim,9(q8), and the cylinder spans the two jaws, so its
+// length depends on both angles. Frames 19 and 20 of the deployed
+// comp_transform_8_19.hpp and comp_transform_8_20.hpp place the two pins: the
+// outer jaw hangs off -a_9 with its arm mirrored, the inner jaw off +a_11.
+// Planar, exactly as the deployed comp_transform_8_24.hpp is -- the two pins
+// are p_S8z + p_S7z = 24.25 mm apart out of plane, which the deployed model
+// drops and which is worth at most 0.6 mm of length over the jaw range.
+CylinderStroke jaw_stroke(double q8)
+{
+  const double mirror_angle =
+    (kJawMirrorQuadratic * q8 + kJawMirrorLinear) * q8 + kJawMirrorConstant;
+  const double mirror_rate = 2.0 * kJawMirrorQuadratic * q8 + kJawMirrorLinear;
+
+  const Eigen::Matrix2d s_perp = perpendicular();
+  Eigen::Matrix2d mirror;
+  mirror << -1.0, 0.0, 0.0, 1.0;
+
+  const Eigen::Vector2d outer_arm = planar_rotation(q8) *
+    Eigen::Vector2d(kOuterJawArmLength + kJawCylinderOuterX, kJawCylinderOuterY);
+  const Eigen::Vector2d inner_arm = planar_rotation(mirror_angle) *
+    Eigen::Vector2d(kInnerJawArmLength + kJawCylinderInnerX, kJawCylinderInnerY);
+
+  const Eigen::Vector2d c_cyl = inner_arm - mirror * outer_arm +
+    Eigen::Vector2d(kInnerJawPivotOffset + kOuterJawPivotOffset, 0.0);
+  const Eigen::Vector2d c_cyl_rate =
+    mirror_rate * (s_perp * inner_arm) - mirror * (s_perp * outer_arm);
+
+  const double stroke = c_cyl.norm();
+  if (!(stroke > 0.0)) {
+    return CylinderStroke{};
+  }
+  return CylinderStroke{stroke, c_cyl.dot(c_cyl_rate) / stroke, true};
+}
+
 // J_cyl of wiki/nomenclature.md §7: diagonal by construction, because the
 // geometry does not couple the axes at all (§5.7).
 Status fill_cylinder_jacobian(Tool tool, const Q& q, ActuatedJacobian& jacobian)
 {
   if (!finite(q)) {
     return failure(ErrorCode::NonFiniteInput, "q is not finite");
-  }
-  if (tool != Tool::Pzs100) {
-    // The 7040 jaw is a four-bar whose pivot geometry and fitted mirror law
-    // are not in wiki/hydraulics.md §6; §2.6 names them but does not give the
-    // numbers. Reporting the gap beats guessing a one-to-one jaw cylinder.
-    return failure(
-      ErrorCode::BackendUnavailable,
-      "the 7040 jaw four-bar geometry is not available in this slice");
   }
 
   jacobian.setZero();
@@ -269,8 +330,20 @@ Status fill_cylinder_jacobian(Tool tool, const Q& q, ActuatedJacobian& jacobian)
   jacobian(kTelescopeAxis, kTelescopeAxis) = 1.0;
   // q7 rotator: a motor, so the motor angle is the joint coordinate (§2.5).
   jacobian(kRotatorAxis, kRotatorAxis) = 1.0;
-  // q8 tool, PZS100: the rail cylinder is one-to-one with q8 (§2.6).
-  jacobian(kToolAxis, kToolAxis) = 1.0;
+  // q8 tool (§2.6). The PZS100 rail cylinder is one-to-one with q8 and there is
+  // no linkage to solve; the 7040 jaw is a four-bar and its cylinder spans both
+  // jaws, so its ratio is configuration-dependent like the boom's.
+  if (tool == Tool::Pzs100) {
+    jacobian(kToolAxis, kToolAxis) = 1.0;
+    return Status{};
+  }
+
+  const CylinderStroke jaw = jaw_stroke(q[7]);
+  if (!jaw.valid) {
+    return failure(
+      ErrorCode::SingularConfiguration, "the 7040 jaw cylinder is degenerate at this q8");
+  }
+  jacobian(kToolAxis, kToolAxis) = jaw.ratio;
   return Status{};
 }
 

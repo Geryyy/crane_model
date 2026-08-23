@@ -111,6 +111,15 @@ crane_model::Q linkage_configuration(double q2, double q3)
   return q;
 }
 
+// The 7040's tool axis is the only one whose ratio depends on q8, so the jaw
+// tests vary that and leave every other axis at zero.
+crane_model::Q jaw_configuration(double q8)
+{
+  crane_model::Q q = crane_model::Q::Zero();
+  q[7] = q8;
+  return q;
+}
+
 crane_model::ChamberPressure zero_pressure()
 {
   crane_model::ChamberPressure pressure;
@@ -176,6 +185,39 @@ double arm_stroke(double q3)
   const Eigen::Vector2d in_plane = moving - Eigen::Vector2d(-1.6802, -0.0485);
   const double lateral = 0.224 - 0.224;  // p_S4y - p_S3z
   return std::sqrt(in_plane.squaredNorm() + lateral * lateral);
+}
+
+// wiki/hydraulics.md §2.6 for the 7040, with the numbers ported from the
+// deployed model. Unlike the two above, this is a port-fidelity restatement and
+// not an independent one: it repeats the deployed fit's own coefficients,
+// because the Freudenstein constants a, b, c and d that produced them are in no
+// file of this workspace, so there is nothing here to derive phi_sim,9 from.
+// What it does check is the composition — that the model drives the inner jaw
+// through the fit and takes the cylinder length between the two attachment
+// points, rather than treating the jaw as a one-to-one axis like the rail.
+double jaw_mirror_angle(double q8)
+{
+  return (-0.121220 * q8 + 1.400122) * q8 - 0.227867;  // Horner, jaw_linkage_p
+}
+
+double jaw_stroke(double q8)
+{
+  const Eigen::Vector2d outer = rotate(q8, 0.8126 - 0.8971, 0.01754);  // a_10 + p_S7x, p_S7y
+  const Eigen::Vector2d inner =
+    rotate(jaw_mirror_angle(q8), 0.8172 - 0.908397, 0.015289);  // a_12 + p_S8x, p_S8y
+  const double ground = 0.328 + 0.336;  // a_9 + a_11
+  // The outer jaw's arm is mirrored against the inner jaw's, so the two arm
+  // x components add rather than subtract.
+  return std::hypot(inner.x() + outer.x() + ground, inner.y() - outer.y());
+}
+
+// The same two attachment points, but with the inner jaw frozen at the mirror
+// angle of q8 = 0: what the stroke would be if only the commanded jaw moved.
+double jaw_stroke_with_frozen_inner_jaw(double q8)
+{
+  const Eigen::Vector2d outer = rotate(q8, 0.8126 - 0.8971, 0.01754);
+  const Eigen::Vector2d inner = rotate(jaw_mirror_angle(0.0), 0.8172 - 0.908397, 0.015289);
+  return std::hypot(inner.x() + outer.x() + 0.328 + 0.336, inner.y() - outer.y());
 }
 
 double transmission_ratio(double (* stroke)(double), double q)
@@ -778,68 +820,140 @@ TEST(CraneModelHydraulicSubset, InvalidHydraulicInputsAreRejected)
     crane_model::ErrorCode::InvalidArgument);
 }
 
-TEST(CraneModelHydraulicSubset, SevenThousandFortyJawLinkageIsNotBackedYet)
+TEST(CraneModelHydraulicSubset, SevenThousandFortyJawUsesTheDeployedFourBarFit)
 {
   const auto model = production_model(crane_model::Tool::Epsilon7040);
   ASSERT_TRUE(model.ok());
-  const auto q = linkage_configuration(0.0, 0.0);
-  // §2.6 names the jaw four-bar and its fitted mirror law but §6 carries no
-  // pivot geometry for it, so the transmission of the GR axis is not derivable
-  // here. It says so instead of guessing a one-to-one jaw cylinder.
-  EXPECT_EQ(model.value().cylinder_jacobian(q).status().code,
-    crane_model::ErrorCode::BackendUnavailable);
-  EXPECT_EQ(model.value().transmission(
-    q, crane_model::DQA::Zero(), zero_pressure()).status().code,
-    crane_model::ErrorCode::BackendUnavailable);
+
+  // PORT FIDELITY, NOT INDEPENDENT VALIDATION. reference::jaw_stroke restates
+  // §2.6's composition, but its mirror law repeats the deployed quadratic's own
+  // coefficients: the Freudenstein constants a, b, c and d that produced that
+  // quadratic are in no file of this workspace, so there is no second source to
+  // check the fit itself against. What is checked here is everything around the
+  // fit — that the model drives the inner jaw through it and takes the cylinder
+  // length between the two attachment points.
+  for (const double q8 : {0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0}) {
+    const auto jacobian = model.value().cylinder_jacobian(jaw_configuration(q8));
+    ASSERT_TRUE(jacobian.ok()) << "q8 = " << q8;
+    const double ratio = jacobian.value()(5, 5);
+    EXPECT_NEAR(
+      ratio, reference::transmission_ratio(&reference::jaw_stroke, q8), 1.0e-8) << "q8 = " << q8;
+    // Not the rail's one-to-one, and not a single-jaw cylinder either: freezing
+    // the inner jaw changes the ratio by a third or more at every q8.
+    EXPECT_NE(ratio, 1.0) << "q8 = " << q8;
+    EXPECT_GT(
+      std::abs(ratio - reference::transmission_ratio(
+        &reference::jaw_stroke_with_frozen_inner_jaw, q8)) / std::abs(ratio), 0.3) << "q8 = " << q8;
+  }
+
+  // The amounts the ported geometry predicts, inside the jaw's hydraulic travel
+  // (s_8 spans 0.537 to 0.829 m over q8 in 0.944 to 2.997 rad, the limits of
+  // pincer_cylinder_piston_in_barrel_linear_joint in the 7040 URDF).
+  const auto opened = model.value().cylinder_jacobian(jaw_configuration(1.0));
+  const auto closed = model.value().cylinder_jacobian(jaw_configuration(3.0));
+  ASSERT_TRUE(opened.ok());
+  ASSERT_TRUE(closed.ok());
+  EXPECT_NEAR(opened.value()(5, 5), 0.144581325689, 1.0e-9);
+  EXPECT_NEAR(closed.value()(5, 5), 0.055268972307, 1.0e-9);
+
+  // The linkage toggles at q8 = 0.2623 rad, where the ratio changes sign. A
+  // one-to-one axis has no such configuration, so this is only reachable
+  // through the four-bar; it sits below the reachable stroke.
+  const auto below = model.value().cylinder_jacobian(jaw_configuration(0.1));
+  const auto above = model.value().cylinder_jacobian(jaw_configuration(0.5));
+  ASSERT_TRUE(below.ok());
+  ASSERT_TRUE(above.ok());
+  EXPECT_LT(below.value()(5, 5), 0.0);
+  EXPECT_GT(above.value()(5, 5), 0.0);
+
+  // Only the tool axis is tool-dependent, and the Jacobian stays diagonal.
+  const auto rail = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(rail.ok());
+  const auto rail_jacobian = rail.value().cylinder_jacobian(jaw_configuration(1.5));
+  const auto jaw_jacobian = model.value().cylinder_jacobian(jaw_configuration(1.5));
+  ASSERT_TRUE(rail_jacobian.ok());
+  ASSERT_TRUE(jaw_jacobian.ok());
+  for (Eigen::Index row = 0; row < 6; ++row) {
+    for (Eigen::Index column = 0; column < 6; ++column) {
+      if (row != column) {
+        EXPECT_DOUBLE_EQ(jaw_jacobian.value()(row, column), 0.0);
+      }
+    }
+    if (row != 5) {
+      EXPECT_DOUBLE_EQ(jaw_jacobian.value()(row, row), rail_jacobian.value()(row, row));
+    }
+  }
+  EXPECT_NE(jaw_jacobian.value()(5, 5), rail_jacobian.value()(5, 5));
+
+  // transmission() carries the same ratio, so the GR axis now produces a
+  // cylinder velocity and a pump flow like the other five.
+  const double jaw_speed = 0.4;
+  crane_model::DQA dq_a = crane_model::DQA::Zero();
+  dq_a[5] = jaw_speed;
+  const auto transmission =
+    model.value().transmission(jaw_configuration(1.5), dq_a, zero_pressure());
+  ASSERT_TRUE(transmission.ok());
+  EXPECT_NEAR(transmission.value().joint_to_cylinder(5, 5), 0.177829106844, 1.0e-9);
+  EXPECT_NEAR(transmission.value().cylinder_velocity[5], 0.177829106844 * jaw_speed, 1.0e-12);
+  EXPECT_NEAR(
+    transmission.value().pump_flow[5],
+    7.854e-3 * transmission.value().cylinder_velocity[5], 1.0e-18);
 }
 
 TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnavailable)
 {
-  const auto model = production_model(crane_model::Tool::Pzs100);
-  ASSERT_TRUE(model.ok());
-  const auto q = valid_q();
-  const auto dq = crane_model::DQ::Ones();
-  const auto payload = valid_payload();
-  const auto scene = crane_model::CollisionScene{};
-  const auto unavailable = crane_model::ErrorCode::BackendUnavailable;
+  // Both tools: the 7040's tool axis joined the subset, everything else did not.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok());
+    const auto q = valid_q();
+    const auto dq = crane_model::DQ::Ones();
+    const auto payload = valid_payload();
+    const auto scene = crane_model::CollisionScene{};
+    const auto unavailable = crane_model::ErrorCode::BackendUnavailable;
 
-  EXPECT_EQ(model.value().forward_kinematics(
-    q, crane_model::Frame::MountingBase, crane_model::Frame::Tcp).status().code, unavailable);
-  EXPECT_EQ(model.value().jacobian(q, crane_model::Frame::Tcp).status().code, unavailable);
-  EXPECT_EQ(model.value().passive_equilibrium(
-    crane_model::QA::Zero(), payload).status().code, unavailable);
-  EXPECT_EQ(model.value().full_dynamics(q, dq, payload).status().code, unavailable);
-  EXPECT_EQ(model.value().reduced_actuated_dynamics(
-    q, dq, crane_model::Input::Zero(), payload).status().code, unavailable);
-  EXPECT_EQ(model.value().inverse_dynamics(q, dq, dq, payload).status().code, unavailable);
-  EXPECT_EQ(model.value().collision_query(q, scene).status().code, unavailable);
-  EXPECT_EQ(model.value().collision_queries(q, scene).status().code, unavailable);
-  EXPECT_EQ(model.value().symbolic_graph({}, payload).status().code, unavailable);
+    EXPECT_EQ(model.value().forward_kinematics(
+      q, crane_model::Frame::MountingBase, crane_model::Frame::Tcp).status().code, unavailable);
+    EXPECT_EQ(model.value().jacobian(q, crane_model::Frame::Tcp).status().code, unavailable);
+    EXPECT_EQ(model.value().passive_equilibrium(
+      crane_model::QA::Zero(), payload).status().code, unavailable);
+    EXPECT_EQ(model.value().full_dynamics(q, dq, payload).status().code, unavailable);
+    EXPECT_EQ(model.value().reduced_actuated_dynamics(
+      q, dq, crane_model::Input::Zero(), payload).status().code, unavailable);
+    EXPECT_EQ(model.value().inverse_dynamics(q, dq, dq, payload).status().code, unavailable);
+    EXPECT_EQ(model.value().collision_query(q, scene).status().code, unavailable);
+    EXPECT_EQ(model.value().collision_queries(q, scene).status().code, unavailable);
+    EXPECT_EQ(model.value().symbolic_graph({}, payload).status().code, unavailable);
+  }
 }
 
 TEST(CraneModelHydraulicSubset, SubsetCallsAllocateNothingAfterConstruction)
 {
-  const auto model = production_model(crane_model::Tool::Pzs100);
-  ASSERT_TRUE(model.ok());
-  const auto q = linkage_configuration(0.2, -0.3);
-  const auto pressure = zero_pressure();
-  crane_model::DQA dq_a;
-  dq_a << 0.3, 0.1, -0.1, 0.02, 0.4, 0.01;
-  // Warm every code path before observing allocations; the model itself is
-  // built once, in create(), which is not real-time.
-  ASSERT_TRUE(model.value().cylinder_jacobian(q).ok());
-  ASSERT_TRUE(model.value().transmission(q, dq_a, pressure).ok());
-  ASSERT_TRUE(model.value().cylinder_force(pressure).ok());
+  // Both tools, because the 7040's jaw four-bar is on the same RT path.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok());
+    auto q = linkage_configuration(0.2, -0.3);
+    q[7] = 1.5;
+    const auto pressure = zero_pressure();
+    crane_model::DQA dq_a;
+    dq_a << 0.3, 0.1, -0.1, 0.02, 0.4, 0.01;
+    // Warm every code path before observing allocations; the model itself is
+    // built once, in create(), which is not real-time.
+    ASSERT_TRUE(model.value().cylinder_jacobian(q).ok());
+    ASSERT_TRUE(model.value().transmission(q, dq_a, pressure).ok());
+    ASSERT_TRUE(model.value().cylinder_force(pressure).ok());
 
-  g_allocation_count.store(0, std::memory_order_relaxed);
-  g_allocation_guard.store(true, std::memory_order_relaxed);
-  bool all_ok = true;
-  for (int index = 0; index < 1000; ++index) {
-    all_ok = all_ok && model.value().cylinder_jacobian(q).ok();
-    all_ok = all_ok && model.value().transmission(q, dq_a, pressure).ok();
-    all_ok = all_ok && model.value().cylinder_force(pressure).ok();
+    g_allocation_count.store(0, std::memory_order_relaxed);
+    g_allocation_guard.store(true, std::memory_order_relaxed);
+    bool all_ok = true;
+    for (int index = 0; index < 1000; ++index) {
+      all_ok = all_ok && model.value().cylinder_jacobian(q).ok();
+      all_ok = all_ok && model.value().transmission(q, dq_a, pressure).ok();
+      all_ok = all_ok && model.value().cylinder_force(pressure).ok();
+    }
+    g_allocation_guard.store(false, std::memory_order_relaxed);
+    EXPECT_TRUE(all_ok);
+    EXPECT_EQ(g_allocation_count.load(std::memory_order_relaxed), 0U);
   }
-  g_allocation_guard.store(false, std::memory_order_relaxed);
-  EXPECT_TRUE(all_ok);
-  EXPECT_EQ(g_allocation_count.load(std::memory_order_relaxed), 0U);
 }
