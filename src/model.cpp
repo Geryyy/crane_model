@@ -6,6 +6,8 @@
 #include <coal/distance.h>
 #include <coal/shape/geometric_shapes.h>
 
+#include <Eigen/Cholesky>
+
 #include <algorithm>
 #include <cmath>
 #include <exception>
@@ -18,10 +20,12 @@
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/model.hpp>
 #include <pinocchio/parsers/urdf.hpp>
+#include <pinocchio/algorithm/crba.hpp>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
+#include <pinocchio/algorithm/rnea.hpp>
 
 #include "collision_model.hpp"
 
@@ -115,6 +119,13 @@ enum AxisIndex : std::size_t
   kRotatorAxis = 4,
   kToolAxis = 5,
 };
+
+// The actuated projection [0, 1, 2, 3, 6, 7] and the passive projection [4, 5]
+// of the model API contract §2, i.e. I_a and I_u of wiki/robot_model.md §0.1.
+// Every block of M and every row of h below is gathered through these; nothing
+// in this file assumes the two classes are contiguous, because they are not.
+constexpr std::array<Eigen::Index, kActuatedDof> kActuatedRows{{0, 1, 2, 3, 6, 7}};
+constexpr std::array<Eigen::Index, kPassiveDof> kPassiveRows{{4, 5}};
 
 // Machine constants, wiki/hydraulics.md §6. They are verified there against
 // parameter_def.cpp and the URDF; symbols follow wiki/nomenclature.md §7.
@@ -450,6 +461,116 @@ Status not_ready()
   return failure(ErrorCode::NotReady, "model has no implementation state");
 }
 
+// --- the payload of wiki/robot_model.md §5 -----------------------------------
+//
+// A rigid body attached to K8_rotator_lower_part, given by m_L, r_L^(8) and
+// Theta_L. Two things the contract leaves open, fixed here and stated in the
+// README because something has to fix them:
+//
+//   * `inertia_k8_kg_m2` is the rotational inertia **about the payload centre of
+//     mass**, with the axes of K8 -- the URDF `<inertial>` convention, so the
+//     same numbers a description would carry for the same body. It is not the
+//     inertia about the K8 origin.
+//   * `valid == false` is not a payload. Contract §4 calls it an explicit
+//     unknown, and an unknown payload is refused rather than silently replaced
+//     by a zero-mass one; a caller carrying nothing declares a valid payload of
+//     zero mass, which is a different statement and is accepted.
+//
+// A rotation-invariant floor on the symmetry and definiteness checks. The
+// entries are kg m^2 and a message round trip loses a few bits, so this is
+// relative to the tensor's own norm rather than absolute.
+constexpr double kInertiaTolerance = 1.0e-9;
+
+Status check_payload(const Payload& payload)
+{
+  if (!payload.valid) {
+    return failure(
+      ErrorCode::InvalidPayload,
+      "payload is not declared valid; an unknown payload is not a zero-mass payload");
+  }
+  if (!std::isfinite(payload.mass_kg) || !finite(payload.center_of_mass_k8_m) ||
+    !finite(payload.inertia_k8_kg_m2))
+  {
+    return failure(ErrorCode::InvalidPayload, "payload carries non-finite data");
+  }
+  if (payload.mass_kg < 0.0) {
+    return failure(ErrorCode::InvalidPayload, "payload mass must be non-negative");
+  }
+  const Eigen::Matrix3d& inertia = payload.inertia_k8_kg_m2;
+  const double scale = std::max(1.0, inertia.norm());
+  if ((inertia - inertia.transpose()).norm() > kInertiaTolerance * scale) {
+    return failure(ErrorCode::InvalidPayload, "payload inertia is not symmetric");
+  }
+  // Positive *semi*-definite: a point mass carries no rotational inertia at all
+  // and is a perfectly good payload, so zero is admissible and negative is not.
+  Eigen::LDLT<Eigen::Matrix3d> factorisation(inertia);
+  if (factorisation.info() != Eigen::Success || !factorisation.isPositive()) {
+    return failure(ErrorCode::InvalidPayload, "payload inertia is not positive semi-definite");
+  }
+  return Status{};
+}
+
+// --- the partitioned dynamics of wiki/robot_model.md §1 ----------------------
+
+// M and h split by the actuated/passive partition. The blocks are gathered by
+// index rather than by a block expression, because I_a is not contiguous.
+struct Partition
+{
+  Eigen::Matrix<double, 6, 6> M_aa{};
+  Eigen::Matrix<double, 6, 2> M_au{};
+  Eigen::Matrix<double, 2, 6> M_ua{};
+  PassiveMass M_uu{};
+  Eigen::Matrix<double, 6, 1> h_a{};
+  QU h_u{};
+};
+
+Partition partition(const FullMass& mass, const DQ& bias)
+{
+  Partition split;
+  for (std::size_t row = 0; row < kActuatedDof; ++row) {
+    split.h_a[static_cast<Eigen::Index>(row)] = bias[kActuatedRows[row]];
+    for (std::size_t column = 0; column < kActuatedDof; ++column) {
+      split.M_aa(
+        static_cast<Eigen::Index>(row),
+        static_cast<Eigen::Index>(column)) = mass(kActuatedRows[row], kActuatedRows[column]);
+    }
+    for (std::size_t column = 0; column < kPassiveDof; ++column) {
+      split.M_au(
+        static_cast<Eigen::Index>(row),
+        static_cast<Eigen::Index>(column)) = mass(kActuatedRows[row], kPassiveRows[column]);
+    }
+  }
+  for (std::size_t row = 0; row < kPassiveDof; ++row) {
+    split.h_u[static_cast<Eigen::Index>(row)] = bias[kPassiveRows[row]];
+    for (std::size_t column = 0; column < kActuatedDof; ++column) {
+      split.M_ua(
+        static_cast<Eigen::Index>(row),
+        static_cast<Eigen::Index>(column)) = mass(kPassiveRows[row], kActuatedRows[column]);
+    }
+    for (std::size_t column = 0; column < kPassiveDof; ++column) {
+      split.M_uu(
+        static_cast<Eigen::Index>(row),
+        static_cast<Eigen::Index>(column)) = mass(kPassiveRows[row], kPassiveRows[column]);
+    }
+  }
+  return split;
+}
+
+// The Cholesky of M_uu, which robot_model §3.1 says is what the sway solve is.
+// A configuration at which it is not positive definite is one where the passive
+// accelerations are not determined, and contract §5 says so rather than
+// returning a matrix of infinities.
+Status factorise_passive_mass(const PassiveMass& M_uu, Eigen::LLT<PassiveMass>& factorisation)
+{
+  factorisation.compute(M_uu);
+  if (factorisation.info() != Eigen::Success) {
+    return failure(
+      ErrorCode::SingularConfiguration,
+      "M_uu is not positive definite at this configuration, so the passive rows do not solve");
+  }
+  return Status{};
+}
+
 // One canonical coordinate's place in the parsed model. `unbounded` is the
 // `continuous` rotator of ROS 2 Interfaces §3.1: Pinocchio stores such a joint
 // as (cos, sin), so it occupies two configuration entries and one velocity
@@ -737,7 +858,9 @@ struct Model::Impl
     data(model),
     configuration(pinocchio::neutral(model)),
     neutral(configuration),
-    joint_jacobian(pinocchio::Data::Matrix6x::Zero(6, model.nv))
+    joint_jacobian(pinocchio::Data::Matrix6x::Zero(6, model.nv)),
+    velocity(Eigen::VectorXd::Zero(model.nv)),
+    acceleration(Eigen::VectorXd::Zero(model.nv))
   {
   }
 
@@ -752,10 +875,43 @@ struct Model::Impl
   Eigen::VectorXd configuration;
   Eigen::VectorXd neutral;
   pinocchio::Data::Matrix6x joint_jacobian;
+  Eigen::VectorXd velocity;
+  Eigen::VectorXd acceleration;
   std::array<JointSlot, kGeneralizedDof> joints{};
   std::vector<CoupledJoint> coupled;
   std::array<pinocchio::FrameIndex, kFrameCount> frames{};
   std::array<bool, kFrameCount> frame_present{};
+
+  // One canonical coordinate's footprint in the parsed model's velocity vector:
+  // its own row, weight one, plus one row per `<mimic>` that follows it, weighted
+  // by that mimic's multiplier. dq_full = P dq and ddq_full = P ddq for the
+  // constant P these rows describe, so M = P^T M_full P and h = P^T h_full --
+  // which is how the second telescope stage and the mirrored rail get their
+  // inertia counted on the coordinate that drives them.
+  struct Drive
+  {
+    Eigen::Index velocity_index{0};
+    double weight{1.0};
+  };
+
+  static constexpr std::size_t kMaxDrives = 4;
+  std::array<std::array<Drive, kMaxDrives>, kGeneralizedDof> drives{};
+  std::array<std::size_t, kGeneralizedDof> drive_count{};
+
+  // D of robot_model §1, diagonal and kept out of Pinocchio: neither `rnea` nor
+  // `nonLinearEffects` applies `model.damping`, which is what makes the split of
+  // §1 -- h from the description, D a fitted parameter -- hold by construction.
+  Q damping{Q::Zero()};
+
+  // The payload body of robot_model §5. Pinocchio has no per-call payload, so it
+  // is written into the inertia of the joint that carries K8_rotator_lower_part
+  // for the duration of one call and restored afterwards. That is fixed-size
+  // spatial arithmetic, not an allocation, and it is the same reason a Model
+  // must not be called from two threads at once.
+  pinocchio::JointIndex payload_joint{0};
+  pinocchio::SE3 payload_placement{pinocchio::SE3::Identity()};
+  pinocchio::Inertia bare_inertia{pinocchio::Inertia::Zero()};
+  bool payload_attachable{false};
 
   // One fitted primitive, bound to the link frame of the parsed description.
   struct Body
@@ -807,6 +963,174 @@ struct Model::Impl
         joint.slot,
         joint.multiplier * q[static_cast<Eigen::Index>(joint.source)] + joint.offset);
     }
+  }
+
+  // dq or ddq of the canonical eight, spread over the rows of the parsed model.
+  // Every joint outside the eight and outside the mimics keeps zero, which is
+  // consistent with write_configuration leaving it at its neutral value.
+  void expand(const DQ& value, Eigen::VectorXd& out) const
+  {
+    out.setZero();
+    for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+      const double coordinate = value[static_cast<Eigen::Index>(index)];
+      for (std::size_t entry = 0; entry < drive_count[index]; ++entry) {
+        const Drive& drive = drives[index][entry];
+        out[drive.velocity_index] = drive.weight * coordinate;
+      }
+    }
+  }
+
+  // P^T applied to a generalized force or a bias vector of the parsed model.
+  void project(const Eigen::VectorXd& full, DQ& out) const
+  {
+    for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+      double sum = 0.0;
+      for (std::size_t entry = 0; entry < drive_count[index]; ++entry) {
+        const Drive& drive = drives[index][entry];
+        sum += drive.weight * full[drive.velocity_index];
+      }
+      out[static_cast<Eigen::Index>(index)] = sum;
+    }
+  }
+
+  // `crba` fills the upper triangle of data.M only, so the lower half is read
+  // back transposed rather than mirrored into place -- mirroring would be an
+  // aliased assignment on a dynamically sized matrix, and this is on the RT path.
+  [[nodiscard]] double mass_entry(Eigen::Index row, Eigen::Index column) const
+  {
+    return row <= column ? data.M(row, column) : data.M(column, row);
+  }
+
+  // P^T M_full P, symmetric by construction.
+  void project_mass(FullMass& out) const
+  {
+    for (std::size_t row = 0; row < kGeneralizedDof; ++row) {
+      for (std::size_t column = row; column < kGeneralizedDof; ++column) {
+        double sum = 0.0;
+        for (std::size_t left = 0; left < drive_count[row]; ++left) {
+          for (std::size_t right = 0; right < drive_count[column]; ++right) {
+            sum += drives[row][left].weight * drives[column][right].weight *
+              mass_entry(drives[row][left].velocity_index, drives[column][right].velocity_index);
+          }
+        }
+        out(static_cast<Eigen::Index>(row), static_cast<Eigen::Index>(column)) = sum;
+        out(static_cast<Eigen::Index>(column), static_cast<Eigen::Index>(row)) = sum;
+      }
+    }
+  }
+
+  Status attach_payload(const Payload& payload)
+  {
+    Status status = check_payload(payload);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!payload_attachable) {
+      return failure(
+        ErrorCode::FrameUnavailable,
+        std::string("the robot description carries no link ") +
+        kFrameLinks[static_cast<std::size_t>(Frame::RotatorLowerPart)].link +
+        ", so a payload cannot be attached");
+    }
+    // Theta_L is about the payload's own centre of mass with the axes of K8,
+    // which is the URDF `<inertial>` convention; act() carries the whole body
+    // from K8 into the frame of the joint that moves it.
+    const pinocchio::Inertia body(
+      payload.mass_kg, payload.center_of_mass_k8_m, payload.inertia_k8_kg_m2);
+    model.inertias[payload_joint] = bare_inertia + payload_placement.act(body);
+    return Status{};
+  }
+
+  void detach_payload()
+  {
+    if (payload_attachable) {
+      model.inertias[payload_joint] = bare_inertia;
+    }
+  }
+
+  // Puts the joint inertia back however the call leaves, because a model that
+  // kept a payload after a failed evaluation would answer the next caller with a
+  // load it is not carrying.
+  class PayloadGuard
+  {
+public:
+    explicit PayloadGuard(Impl& owner) noexcept
+    : owner_(owner)
+    {
+    }
+    ~PayloadGuard() {owner_.detach_payload();}
+    PayloadGuard(const PayloadGuard&) = delete;
+    PayloadGuard& operator=(const PayloadGuard&) = delete;
+
+private:
+    Impl& owner_;
+  };
+
+  // M and h + D dq for one (q, dq, payload): the equation of motion of
+  // robot_model §1, in the canonical eight coordinates.
+  Status evaluate(const Q& q, const DQ& dq, const Payload& payload, FullMass& mass, DQ& bias)
+  {
+    if (!finite(q)) {
+      return failure(ErrorCode::NonFiniteInput, "q is not finite");
+    }
+    if (!finite(dq)) {
+      return failure(ErrorCode::NonFiniteInput, "dq is not finite");
+    }
+    Status status = attach_payload(payload);
+    if (!status.ok()) {
+      return status;
+    }
+    const PayloadGuard guard(*this);
+
+    write_configuration(q);
+    expand(dq, velocity);
+    pinocchio::crba(model, data, configuration);
+    pinocchio::nonLinearEffects(model, data, configuration, velocity);
+    project_mass(mass);
+    project(data.nle, bias);
+
+    bias += damping.cwiseProduct(dq);
+    if (!finite(mass) || !finite(bias)) {
+      return failure(
+        ErrorCode::SingularConfiguration,
+        "the mass matrix or the bias is not finite at this configuration");
+    }
+    return Status{};
+  }
+
+  // robot_model §3.3: tau = M ddq + h + D dq, a single `rnea` and the damping
+  // term the description does not carry.
+  Status evaluate_torque(
+    const Q& q, const DQ& dq, const DQ& ddq, const Payload& payload, DQ& tau)
+  {
+    if (!finite(q)) {
+      return failure(ErrorCode::NonFiniteInput, "q is not finite");
+    }
+    if (!finite(dq)) {
+      return failure(ErrorCode::NonFiniteInput, "dq is not finite");
+    }
+    if (!finite(ddq)) {
+      return failure(ErrorCode::NonFiniteInput, "ddq is not finite");
+    }
+    Status status = attach_payload(payload);
+    if (!status.ok()) {
+      return status;
+    }
+    const PayloadGuard guard(*this);
+
+    write_configuration(q);
+    expand(dq, velocity);
+    expand(ddq, acceleration);
+    pinocchio::rnea(model, data, configuration, velocity, acceleration);
+    project(data.tau, tau);
+
+    tau += damping.cwiseProduct(dq);
+    if (!finite(tau)) {
+      return failure(
+        ErrorCode::SingularConfiguration,
+        "the inverse-dynamics torque is not finite at this configuration");
+    }
+    return Status{};
   }
 
   // The fit is for this machine. A description that does not carry every link it
@@ -1002,10 +1326,58 @@ Result<Model> Model::create(const ModelConfig& config)
     impl->coupled.push_back(coupled);
   }
 
+  // P, one column per canonical coordinate: the coordinate's own row plus the
+  // rows of the mimics that follow it. Built once, so no dynamics call has to
+  // walk the mimic list again.
+  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+    impl->drives[index][0] = Model::Impl::Drive{impl->joints[index].velocity_index, 1.0};
+    impl->drive_count[index] = 1;
+  }
+  for (const CoupledJoint& coupled : impl->coupled) {
+    std::size_t& count = impl->drive_count[coupled.source];
+    if (count == Model::Impl::kMaxDrives) {
+      return Result<Model>::failure(
+        failure(
+          ErrorCode::InvalidRobotDescription,
+          "a canonical joint is mimicked by more joints than this model carries rows for"));
+    }
+    impl->drives[coupled.source][count] =
+      Model::Impl::Drive{coupled.slot.velocity_index, coupled.multiplier};
+    ++count;
+  }
+
+  // D of robot_model §1. The description is its source
+  // (wiki/implementation/parameters.md §1), and §5 says those entries are the
+  // identified values on the actuated axes and the hand-tuned per-tool values on
+  // the two passive ones -- which is why reading them from the selected
+  // description gets the tool dependence right without a table here.
+  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+    const ::urdf::JointConstSharedPtr joint = tree->getJoint(canonical[index]);
+    if (joint && joint->dynamics) {
+      impl->damping[static_cast<Eigen::Index>(index)] = joint->dynamics->damping;
+    }
+  }
+  // Except the telescope. parameters §5 calls its URDF damping a simulation
+  // stability hack an order of magnitude above the identified value and says it
+  // must not enter the model; no identified value is recorded anywhere in the
+  // vault, so the entry is zero rather than a guess. README says so.
+  impl->damping[3] = 0.0;
+
   for (std::size_t index = 0; index < kFrameCount; ++index) {
     const bool present = impl->model.existFrame(kFrameLinks[index].link);
     impl->frame_present[index] = present;
     impl->frames[index] = present ? impl->model.getFrameId(kFrameLinks[index].link) : 0U;
+  }
+
+  // Where a payload attaches (robot_model §5): the joint that carries
+  // K8_rotator_lower_part, and the fixed placement of that link within it.
+  const std::size_t rotator_lower_part = static_cast<std::size_t>(Frame::RotatorLowerPart);
+  if (impl->frame_present[rotator_lower_part]) {
+    const pinocchio::Frame& frame = impl->model.frames[impl->frames[rotator_lower_part]];
+    impl->payload_joint = frame.parentJoint;
+    impl->payload_placement = frame.placement;
+    impl->bare_inertia = impl->model.inertias[impl->payload_joint];
+    impl->payload_attachable = true;
   }
 
   // The collision model. Building it is construction work, not query work
@@ -1253,6 +1625,114 @@ Result<std::vector<CollisionResult>> Model::collision_queries(
   return Result<std::vector<CollisionResult>>::success(std::move(results));
 }
 
+// robot_model §1 evaluated whole: the 8x8 mass matrix, the bias
+// h + D dq of contract §7, and the inverse-dynamics torque of §3.3.
+//
+// `inverse_dynamics_tau` needs an acceleration the signature does not carry, and
+// there is exactly one the model can supply without inventing an input: the
+// *consistent* one, ddq_a = 0 with ddq_u from §3.1. That is the torque holding
+// the actuated axes still while the pendulum swings freely, its passive rows
+// vanish by construction (§3.3), and its actuated rows are bias_eff of §3.4 at
+// zero actuated acceleration. Reporting tau at ddq = 0 instead would make the
+// field a copy of `bias`. README states this reading.
+Result<FullDynamics> Model::full_dynamics(
+  const Q& q, const DQ& dq, const Payload& payload) const
+{
+  if (!impl_) {
+    return Result<FullDynamics>::failure(not_ready());
+  }
+  FullDynamics result;
+  Status status = impl_->evaluate(q, dq, payload, result.mass, result.bias);
+  if (!status.ok()) {
+    return Result<FullDynamics>::failure(std::move(status));
+  }
+
+  const Partition split = partition(result.mass, result.bias);
+  Eigen::LLT<PassiveMass> factorisation;
+  status = factorise_passive_mass(split.M_uu, factorisation);
+  if (!status.ok()) {
+    return Result<FullDynamics>::failure(std::move(status));
+  }
+
+  DQ ddq = DQ::Zero();
+  const QU ddq_u = -factorisation.solve(split.h_u);
+  for (std::size_t row = 0; row < kPassiveDof; ++row) {
+    ddq[kPassiveRows[row]] = ddq_u[static_cast<Eigen::Index>(row)];
+  }
+  result.inverse_dynamics_tau.noalias() = result.mass * ddq;
+  result.inverse_dynamics_tau += result.bias;
+  if (!finite(result.inverse_dynamics_tau)) {
+    return Result<FullDynamics>::failure(
+      failure(
+        ErrorCode::SingularConfiguration,
+        "the consistent passive acceleration is not finite at this configuration"));
+  }
+  return Result<FullDynamics>::success(std::move(result));
+}
+
+// robot_model §3.3, all eight rows. The passive ones are only zero when ddq_u is
+// the one §3.1 gives for this ddq_a; for any other acceleration they are the
+// generalized force the passive joints would need and do not have, which is what
+// makes the invariant of contract §7 a test and not a tautology.
+Result<DQ> Model::inverse_dynamics(
+  const Q& q, const DQ& dq, const DQ& ddq, const Payload& payload) const
+{
+  if (!impl_) {
+    return Result<DQ>::failure(not_ready());
+  }
+  DQ tau;
+  Status status = impl_->evaluate_torque(q, dq, ddq, payload, tau);
+  if (!status.ok()) {
+    return Result<DQ>::failure(std::move(status));
+  }
+  return Result<DQ>::success(std::move(tau));
+}
+
+// robot_model §3.4: the Schur complement that eliminates ddq_u, and the residual
+// that comes with it. `ddq_a` is validated and does not enter either -- the
+// reduction is a property of (q, dq, payload) alone, and tau_a = M_eff ddq_a +
+// h_eff is the caller's product to form. It stays in the signature because the
+// contract froze it there.
+Result<ReducedDynamics> Model::reduced_actuated_dynamics(
+  const Q& q, const DQ& dq, const Input& ddq_a, const Payload& payload) const
+{
+  if (!impl_) {
+    return Result<ReducedDynamics>::failure(not_ready());
+  }
+  if (!finite(ddq_a)) {
+    return Result<ReducedDynamics>::failure(
+      failure(ErrorCode::NonFiniteInput, "ddq_a is not finite"));
+  }
+  FullMass mass;
+  DQ bias;
+  Status status = impl_->evaluate(q, dq, payload, mass, bias);
+  if (!status.ok()) {
+    return Result<ReducedDynamics>::failure(std::move(status));
+  }
+
+  const Partition split = partition(mass, bias);
+  Eigen::LLT<PassiveMass> factorisation;
+  status = factorise_passive_mass(split.M_uu, factorisation);
+  if (!status.ok()) {
+    return Result<ReducedDynamics>::failure(std::move(status));
+  }
+
+  // M_uu^{-1} M_ua and M_uu^{-1} h_u, the two solves both terms of §3.4 share.
+  const Eigen::Matrix<double, 2, 6> solved_mass = factorisation.solve(split.M_ua);
+  const QU solved_bias = factorisation.solve(split.h_u);
+
+  ReducedDynamics result;
+  result.mass_eff.noalias() = split.M_aa - split.M_au * solved_mass;
+  result.bias_eff.noalias() = split.h_a - split.M_au * solved_bias;
+  if (!finite(result.mass_eff) || !finite(result.bias_eff)) {
+    return Result<ReducedDynamics>::failure(
+      failure(
+        ErrorCode::SingularConfiguration,
+        "the effective inertia is not finite at this configuration"));
+  }
+  return Result<ReducedDynamics>::success(std::move(result));
+}
+
 #define CRANE_MODEL_UNAVAILABLE(type, name) \
   Result<type> Model::name \
   { \
@@ -1261,12 +1741,6 @@ Result<std::vector<CollisionResult>> Model::collision_queries(
   }
 
 CRANE_MODEL_UNAVAILABLE(QU, passive_equilibrium(const QA&, const Payload&) const)
-CRANE_MODEL_UNAVAILABLE(FullDynamics, full_dynamics(const Q&, const DQ&, const Payload&) const)
-CRANE_MODEL_UNAVAILABLE(
-  ReducedDynamics,
-  reduced_actuated_dynamics(const Q&, const DQ&, const Input&, const Payload&) const)
-CRANE_MODEL_UNAVAILABLE(
-  DQ, inverse_dynamics(const Q&, const DQ&, const DQ&, const Payload&) const)
 CRANE_MODEL_UNAVAILABLE(
   SymbolicGraph, symbolic_graph(const SymbolicGraphSpec&, const Payload&) const)
 

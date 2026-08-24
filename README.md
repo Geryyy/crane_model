@@ -11,8 +11,9 @@ graph contracts.
 |---|---|
 | `cylinder_jacobian`, `transmission`, `cylinder_force` | closed-form cylinder geometry of `wiki/hydraulics.md` §2–§4 |
 | `forward_kinematics`, `jacobian` | Pinocchio, on the `robot_description_xml` the caller supplies |
+| `full_dynamics`, `inverse_dynamics`, `reduced_actuated_dynamics` | Pinocchio `crba`, `nonLinearEffects` and `rnea` on the same model |
 | `collision_query`, `collision_queries` | Coal, over geometry fitted to the same description |
-| everything else | `BackendUnavailable` at runtime |
+| `passive_equilibrium`, `symbolic_graph` | `BackendUnavailable` at runtime |
 
 `Model::create` parses the description with Pinocchio and maps the canonical
 eight coordinates of contract §2 onto it by their URDF joint names, which keep
@@ -46,6 +47,118 @@ telescope column carries both stages, because the description mimics
 Both calls are allocation-free after construction and are asserted to be, but
 they write into the `pinocchio::Data` workspace the model owns, so one `Model`
 must not be called from two threads at once.
+
+## Rigid-body dynamics
+
+`wiki/robot_model.md` §1, evaluated in the canonical eight coordinates:
+
+$$\mat{M}(q)\,\ddot q + \vec h(q,\dot q) + \mat D\,\dot q = \vec\tau$$
+
+`full_dynamics` returns `M`, the bias `h + D dq` that contract §7 asks for, and
+an inverse-dynamics torque; `inverse_dynamics` returns all eight rows for a given
+`ddq`; `reduced_actuated_dynamics` returns the effective inertia and residual of
+§3.4. All three are allocation-free after construction and are covered by the
+guard in the contract test.
+
+### The mimic joints are counted, not dropped
+
+Pinocchio drops `<mimic>`, so the two mimicked joints — the second telescope
+stage `q5_small_telescope` and, on the PZS100, the mirrored `q11_right_rail_joint`
+— are ordinary joints in the parsed model. Their velocity rows are constant
+multiples of the coordinate that drives them, so with that constant projection
+$\mat P$ the model reports $\mat P^{\mathsf T}\mat M_\text{full}\mat P$ and
+$\mat P^{\mathsf T}\vec h_\text{full}$. Their inertia therefore lands on `q4` and
+on `q8` rather than being lost. `MassMatrixIsTheKineticEnergyOfTheSameDescription`
+is what says so: it checks $\tfrac12 \dot q^{\mathsf T}\mat M\dot q$ against
+Pinocchio's kinetic energy of the same description, an algorithm that never forms
+a mass matrix.
+
+Everything else the description carries and this API does not — the four cylinder
+sub-chains, and the 7040's driven inner jaw — stays at its neutral configuration
+with zero velocity, exactly as it does for forward kinematics. Those bodies do
+carry mass (about 166 kg of boom cylinder and 118 kg of arm cylinder), so they
+contribute inertia at a placement the closed linkage would not put them at. The
+description closes those loops only in Gazebo; that is a property of the
+description, not a choice made here, and it is one of the things the
+recorded-trajectory parity campaign is for.
+
+### Where each term comes from
+
+- **`h`** is Pinocchio's `nonLinearEffects` — Coriolis, centrifugal and gravity.
+  It is kept whole: `wiki/robot_model.md` §3.1 warns that the centrifugal
+  coupling from slewing into the sway grows with radius and rate, and
+  `CentrifugalCouplingFromSlewingReachesThePassiveRows` shows that term arriving
+  in the passive rows and scaling as the square of the slewing rate.
+- **Gravity** is `ModelConfig::gravity_m_s2`, written into `model.gravity` at
+  construction. Nothing here compiles in a 9.81.
+- **`D`** is read from the selected description's `<dynamics damping>`, per
+  `wiki/implementation/parameters.md` §1 and §5 — which is also what makes the
+  passive damping tool-dependent without a table in this file, since the two
+  descriptions carry §5's hand-tuned per-tool values. Two deliberate departures:
+  - **the telescope entry is zero.** §5 calls the URDF's `3.4e4` a simulation
+    stability hack an order of magnitude above the identified value and says it
+    must not enter the model. No identified value is recorded anywhere in the
+    vault, so the entry is zero rather than a guess.
+  - **the mimicked joints' own damping is not added.** §5 tabulates damping per
+    machine axis, and the mirrored rail's entry is the same simulation number
+    duplicated for Gazebo; adding it would silently double the PZS100 tool axis
+    and leave the 7040 alone.
+  Coulomb friction, which the description also carries, is not applied: the
+  equation of motion of §1 has a viscous term and nothing else.
+
+### What `FullDynamics::inverse_dynamics_tau` is evaluated at
+
+The frozen struct carries an inverse-dynamics torque but `full_dynamics` takes no
+acceleration. The model reports the torque at the **consistent** acceleration of
+§3.1 with $\ddot q_\text{a}=\vec 0$ — the torque holding the actuated axes still
+while the pendulum swings freely. Its passive rows vanish by construction (§3.3)
+and its actuated rows are exactly `bias_eff`. The alternative reading, $\tau$ at
+$\ddot q=\vec 0$, would make the field a copy of `bias`.
+
+`reduced_actuated_dynamics` takes a `ddq_a` that does not enter either output:
+$\bar{\mat M}$ and $\bar{\vec h}$ are properties of $(q,\dot q,\text{payload})$
+alone and $\tau_\text{a}=\bar{\mat M}\ddot q_\text{a}+\bar{\vec h}$ is the
+caller's product to form. The argument is validated for finiteness and is
+otherwise unused; it stays in the signature because the contract froze it there.
+
+### The payload
+
+`Payload` is the body of `wiki/robot_model.md` §5, attached rigidly to
+`K8_rotator_lower_part`. The contract leaves two things open and this library
+fixes them, because something has to:
+
+- **`inertia_k8_kg_m2` is about the payload's own centre of mass**, with the axes
+  of `K8` — the URDF `<inertial>` convention, so the same numbers a description
+  would carry for the same body. It is not the inertia about the `K8` origin.
+  `ThePayloadIsTheBodyRobotModelSaysItIs` pins this: it checks what the payload
+  adds to `M` and to the bias against the frame's own public Jacobian, and the
+  König split it uses has no parallel-axis term in it.
+- **`valid == false` is refused**, with `InvalidPayload`. Contract §4 calls it an
+  explicit unknown payload and says it is not permission to use a zero-mass one,
+  and the mock refuses it, so answering an unknown with the dynamics of an empty
+  gripper would be exactly the substitution that rule forbids. **An empty gripper
+  is a declared payload of zero mass** — `valid = true`, `mass_kg = 0` — which is
+  accepted, and which is a different statement: a zero-mass body still carrying a
+  tensor is a different mass matrix from no body at all.
+
+A payload with negative or non-finite mass, non-finite geometry, an asymmetric
+inertia, or an inertia that is not positive semi-definite is `InvalidPayload`.
+Zero inertia is admissible: a point mass is a payload.
+
+Pinocchio has no per-call payload, so the body is written into the inertia of the
+joint that carries `K8_rotator_lower_part` for the length of one call and restored
+afterwards. That is fixed-size spatial arithmetic rather than an allocation, but
+it means a dynamics call briefly mutates the model as well as its `Data` — one
+more reason a `Model` must not be called from two threads at once.
+
+### Failure
+
+A non-finite `q`, `dq`, `ddq` or `ddq_a` is `NonFiniteInput`. A configuration at
+which the description cannot produce finite numbers, or at which $\mat M_{uu}$ is
+not positive definite so the passive rows do not solve, is
+`SingularConfiguration` — never a matrix of infinities. The real descriptions do
+not reach either state inside their joint ranges; the telescope run out to
+$10^{200}\,$m does, which is what the test uses.
 
 ## Collision
 
@@ -106,10 +219,11 @@ are in `K0_mounting_base`.
 
 `collision_queries` returns a dynamically sized container and is therefore **not
 an RT API call** (contract §10); neither is `collision_query`, which shares its
-implementation. The allocation guard in the contract test covers the five calls
-that are RT — the three hydraulic ones, `forward_kinematics` and `jacobian` —
-and `CollisionQueriesIsNotARealTimeCall` demonstrates that collision allocates,
-so the guard's silence about it is a fact rather than an oversight.
+implementation. The allocation guard in the contract test covers the eight calls
+that are RT — the three hydraulic ones, `forward_kinematics`, `jacobian` and the
+three rigid-body dynamics calls — and `CollisionQueriesIsNotARealTimeCall`
+demonstrates that collision allocates, so the guard's silence about it is a fact
+rather than an oversight.
 
 ### The scene arrives in `K0_mounting_base`
 
@@ -194,6 +308,16 @@ When it fails, re-run the derivation rather than editing the fit:
 It prints the two tables of `src/collision_model.hpp` on stdout and rewrites the
 SRDF; it needs `numpy` and the `coal` Python bindings, both already in the image,
 and it is not part of the build.
+
+The dynamics tests do not check a mass matrix against a second mass matrix. Their
+oracle is the **energy** of the same description — `computeKineticEnergy` and
+`computePotentialEnergy`, which the library never calls — plus the public
+Jacobian. $T$ checks `M`, $\partial U/\partial q$ checks the gravity part of the
+bias, the minimum of $U$ over the two passive coordinates locates the equilibrium
+of §2.3 without any torque algorithm being asked, and the reduction of §3.4 is
+recovered from `inverse_dynamics` alone by solving its passive rows to zero. If
+one of them fails, the disagreement is with the description, not with a
+transcription of the same algebra.
 
 Build this package in the integration workspace so Eigen and retained
 dependencies are available:

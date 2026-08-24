@@ -2,6 +2,8 @@
 
 #include <urdf_parser/urdf_parser.h>
 
+#include <Eigen/Eigenvalues>
+
 #include <limits>
 #include <algorithm>
 #include <array>
@@ -20,6 +22,7 @@
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/model.hpp>
 #include <pinocchio/parsers/urdf.hpp>
+#include <pinocchio/algorithm/energy.hpp>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
@@ -1074,24 +1077,18 @@ TEST(CraneModelHydraulicSubset, SevenThousandFortyJawUsesTheDeployedFourBarFit)
 
 TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnavailable)
 {
-  // Both tools. Slice 4 arrives in pieces: forward kinematics, the Jacobian and
-  // now collision have a backend, the dynamics, passive equilibrium and symbolic
-  // graph do not, and each of them says so call by call rather than handing a
-  // consumer a stub.
+  // Both tools. Slice 4 arrives in pieces: forward kinematics, the Jacobian,
+  // collision and now the rigid-body dynamics have a backend, the passive
+  // equilibrium and the symbolic graph do not, and each of the two says so call
+  // by call rather than handing a consumer a stub.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
     const auto model = production_model(tool);
     ASSERT_TRUE(model.ok());
-    const auto q = valid_q();
-    const auto dq = crane_model::DQ::Ones();
     const auto payload = valid_payload();
     const auto unavailable = crane_model::ErrorCode::BackendUnavailable;
 
     EXPECT_EQ(model.value().passive_equilibrium(
       crane_model::QA::Zero(), payload).status().code, unavailable);
-    EXPECT_EQ(model.value().full_dynamics(q, dq, payload).status().code, unavailable);
-    EXPECT_EQ(model.value().reduced_actuated_dynamics(
-      q, dq, crane_model::Input::Zero(), payload).status().code, unavailable);
-    EXPECT_EQ(model.value().inverse_dynamics(q, dq, dq, payload).status().code, unavailable);
     EXPECT_EQ(model.value().symbolic_graph({}, payload).status().code, unavailable);
   }
 }
@@ -1099,12 +1096,14 @@ TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnav
 TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
 {
   // Both tools, because the 7040's jaw four-bar is on the same RT path, and now
-  // also forward kinematics and the Jacobian: contract §10 says a call that
-  // cannot be shown allocation-free is not an RT API call, and both of these
-  // are on the control path. The Pinocchio model and its Data workspace are
-  // built once, in create(), which is not real-time.
+  // also forward kinematics, the Jacobian and the three rigid-body dynamics
+  // calls: contract §10 says a call that cannot be shown allocation-free is not
+  // an RT API call, and all of these are on the control path. The Pinocchio
+  // model, its Data workspace and the two velocity buffers are built once, in
+  // create(), which is not real-time; the payload is written into the model's
+  // own inertia for the length of a call, which is fixed-size arithmetic.
   //
-  // These five are the whole of what this guard claims. Collision is not among
+  // These eight are the whole of what this guard claims. Collision is not among
   // them and is not meant to be; CollisionQueriesIsNotARealTimeCall shows it
   // allocating, so the omission here is a statement and not a gap.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
@@ -1115,6 +1114,9 @@ TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
     const auto pressure = zero_pressure();
     crane_model::DQA dq_a;
     dq_a << 0.3, 0.1, -0.1, 0.02, 0.4, 0.01;
+    const crane_model::DQ dq = crane_model::DQ::Constant(0.15);
+    const auto ddq_a = crane_model::Input::Constant(0.2);
+    const auto payload = valid_payload();
     const auto base = crane_model::Frame::MountingBase;
     const auto tcp = crane_model::Frame::Tcp;
     // Warm every code path before observing allocations.
@@ -1123,6 +1125,9 @@ TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
     ASSERT_TRUE(model.value().cylinder_force(pressure).ok());
     ASSERT_TRUE(model.value().forward_kinematics(q, base, tcp).ok());
     ASSERT_TRUE(model.value().jacobian(q, tcp).ok());
+    ASSERT_TRUE(model.value().full_dynamics(q, dq, payload).ok());
+    ASSERT_TRUE(model.value().inverse_dynamics(q, dq, dq, payload).ok());
+    ASSERT_TRUE(model.value().reduced_actuated_dynamics(q, dq, ddq_a, payload).ok());
 
     g_allocation_count.store(0, std::memory_order_relaxed);
     g_allocation_guard.store(true, std::memory_order_relaxed);
@@ -1133,6 +1138,9 @@ TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
       all_ok = all_ok && model.value().cylinder_force(pressure).ok();
       all_ok = all_ok && model.value().forward_kinematics(q, base, tcp).ok();
       all_ok = all_ok && model.value().jacobian(q, tcp).ok();
+      all_ok = all_ok && model.value().full_dynamics(q, dq, payload).ok();
+      all_ok = all_ok && model.value().inverse_dynamics(q, dq, dq, payload).ok();
+      all_ok = all_ok && model.value().reduced_actuated_dynamics(q, dq, ddq_a, payload).ok();
     }
     g_allocation_guard.store(false, std::memory_order_relaxed);
     EXPECT_TRUE(all_ok);
@@ -1541,6 +1549,855 @@ TEST(CraneModelDescription, CylinderTransmissionFollowsTheDescriptionsGeometry)
         [&jaw](double angle) {return reference::jaw_stroke_from(jaw, angle);}, q8),
       kExactRatioTolerance) << "q8 = " << q8;
   }
+}
+
+// --- the rigid-body dynamics -------------------------------------------------
+//
+// wiki/robot_model.md §1 and §3. The oracle here is deliberately not a second
+// mass matrix: it is the *energy* of the same description, evaluated by
+// Pinocchio algorithms the model under test never calls. T(q, dq) is what
+// (1/2) dq^T M dq has to be, U(q) is what the gravity part of h has to be the
+// gradient of, and the minimum of U over the two passive coordinates is the
+// equilibrium of §2.3 without any torque algorithm being asked.
+
+namespace
+{
+namespace energy
+{
+
+// The same description, parsed a second time, with the canonical map and the
+// `<mimic>` couplings read out of urdfdom rather than out of the model under
+// test.
+class Reference
+{
+public:
+  Reference(crane_model::Tool tool, const std::array<std::string, 8>& names)
+  : model_(build(tool)), data_(model_), neutral_(pinocchio::neutral(model_))
+  {
+    for (std::size_t index = 0; index < 8; ++index) {
+      map_[index].push_back(slot(names[index], 1.0, 0.0));
+    }
+    const ::urdf::ModelInterfaceSharedPtr tree = ::urdf::parseURDF(description_for(tool));
+    EXPECT_TRUE(static_cast<bool>(tree));
+    for (const auto& entry : tree->joints_) {
+      const auto& joint = entry.second;
+      if (!joint || !joint->mimic) {
+        continue;
+      }
+      const auto source = std::find(names.begin(), names.end(), joint->mimic->joint_name);
+      if (source == names.end() || !model_.existJointName(joint->name)) {
+        continue;
+      }
+      map_[static_cast<std::size_t>(std::distance(names.begin(), source))].push_back(
+        slot(joint->name, joint->mimic->multiplier, joint->mimic->offset));
+    }
+  }
+
+  void set_gravity(const Eigen::Vector3d& gravity) { model_.gravity.linear() = gravity; }
+
+  // The payload of robot_model §5, appended the other way round: as a body on
+  // the joint that carries K8_rotator_lower_part, at that link's own placement.
+  void add_payload(const crane_model::Payload& payload)
+  {
+    const pinocchio::FrameIndex frame = model_.getFrameId("K8_rotator_lower_part");
+    model_.appendBodyToJoint(
+      model_.frames[frame].parentJoint,
+      pinocchio::Inertia(
+        payload.mass_kg, payload.center_of_mass_k8_m, payload.inertia_k8_kg_m2),
+      model_.frames[frame].placement);
+    data_ = pinocchio::Data(model_);
+  }
+
+  double kinetic(const crane_model::Q& q, const crane_model::DQ& dq)
+  {
+    return pinocchio::computeKineticEnergy(model_, data_, configuration(q), velocity(dq));
+  }
+
+  double potential(const crane_model::Q& q)
+  {
+    return pinocchio::computePotentialEnergy(model_, data_, configuration(q));
+  }
+
+private:
+  struct Slot
+  {
+    Eigen::Index idx_q{0};
+    Eigen::Index idx_v{0};
+    bool unbounded{false};
+    double multiplier{1.0};
+    double offset{0.0};
+  };
+
+  static pinocchio::Model build(crane_model::Tool tool)
+  {
+    pinocchio::Model model;
+    pinocchio::urdf::buildModelFromXML(description_for(tool), model);
+    return model;
+  }
+
+  Slot slot(const std::string& name, double multiplier, double offset) const
+  {
+    EXPECT_TRUE(model_.existJointName(name)) << "no joint " << name;
+    const auto& joint = model_.joints[model_.getJointId(name)];
+    Slot value;
+    value.idx_q = static_cast<Eigen::Index>(joint.idx_q());
+    value.idx_v = static_cast<Eigen::Index>(joint.idx_v());
+    value.unbounded = joint.nq() == 2;  // the `continuous` rotator, stored as (cos, sin)
+    value.multiplier = multiplier;
+    value.offset = offset;
+    return value;
+  }
+
+  Eigen::VectorXd configuration(const crane_model::Q& q) const
+  {
+    Eigen::VectorXd value = neutral_;
+    for (std::size_t index = 0; index < 8; ++index) {
+      for (const Slot& entry : map_[index]) {
+        const double coordinate =
+          entry.multiplier * q[static_cast<Eigen::Index>(index)] + entry.offset;
+        if (entry.unbounded) {
+          value[entry.idx_q] = std::cos(coordinate);
+          value[entry.idx_q + 1] = std::sin(coordinate);
+        } else {
+          value[entry.idx_q] = coordinate;
+        }
+      }
+    }
+    return value;
+  }
+
+  Eigen::VectorXd velocity(const crane_model::DQ& dq) const
+  {
+    Eigen::VectorXd value = Eigen::VectorXd::Zero(model_.nv);
+    for (std::size_t index = 0; index < 8; ++index) {
+      for (const Slot& entry : map_[index]) {
+        value[entry.idx_v] = entry.multiplier * dq[static_cast<Eigen::Index>(index)];
+      }
+    }
+    return value;
+  }
+
+  pinocchio::Model model_;
+  pinocchio::Data data_;
+  Eigen::VectorXd neutral_;
+  std::array<std::vector<Slot>, 8> map_;
+};
+
+// Central differences of U. The step is the cube root of the double-precision
+// resolution of an energy of order 1e5 J, which is where rounding and truncation
+// meet; the residual error is under 1e-5 N m on torques of order 1e4.
+constexpr double kEnergyStep = 5.0e-6;
+
+crane_model::DQ gravity_gradient(Reference& reference, const crane_model::Q& q)
+{
+  crane_model::DQ gradient;
+  for (Eigen::Index index = 0; index < 8; ++index) {
+    crane_model::Q forward = q;
+    crane_model::Q backward = q;
+    forward[index] += kEnergyStep;
+    backward[index] -= kEnergyStep;
+    gradient[index] =
+      (reference.potential(forward) - reference.potential(backward)) / (2.0 * kEnergyStep);
+  }
+  return gradient;
+}
+
+// The passive equilibrium of robot_model §2.3, located as the minimum of U over
+// the two passive coordinates: a coarse sweep to pick the well, then Newton on
+// the numerical gradient to sit down in it. The Hessian uses a much larger step
+// than the gradient because a second difference amplifies rounding by 1/h^2 and
+// only sets the search *direction* -- the fixed point is where the gradient
+// vanishes, so it is the gradient's accuracy that ends up in the residual.
+crane_model::QU equilibrium(Reference& reference, const crane_model::Q& q_a)
+{
+  const auto potential_at = [&reference, &q_a](const crane_model::QU& passive) {
+      crane_model::Q probe = q_a;
+      probe[4] = passive[0];
+      probe[5] = passive[1];
+      return reference.potential(probe);
+    };
+
+  constexpr int kSweep = 48;
+  crane_model::QU best;
+  best << 0.0, M_PI_2;
+  double lowest = std::numeric_limits<double>::infinity();
+  for (int tip = 0; tip <= kSweep; ++tip) {
+    for (int tilt = 0; tilt <= kSweep; ++tilt) {
+      crane_model::QU candidate;
+      candidate << -M_PI_2 + M_PI * tip / kSweep, 0.4 + 2.0 * tilt / kSweep;
+      const double value = potential_at(candidate);
+      if (value < lowest) {
+        lowest = value;
+        best = candidate;
+      }
+    }
+  }
+
+  constexpr double kCurvatureStep = 1.0e-3;
+  for (int iteration = 0; iteration < 50; ++iteration) {
+    Eigen::Vector2d gradient;
+    Eigen::Matrix2d curvature;
+    const double centre = potential_at(best);
+    for (int axis = 0; axis < 2; ++axis) {
+      crane_model::QU forward = best;
+      crane_model::QU backward = best;
+      forward[axis] += kEnergyStep;
+      backward[axis] -= kEnergyStep;
+      gradient[axis] = (potential_at(forward) - potential_at(backward)) / (2.0 * kEnergyStep);
+      forward[axis] = best[axis] + kCurvatureStep;
+      backward[axis] = best[axis] - kCurvatureStep;
+      curvature(axis, axis) = (potential_at(forward) - 2.0 * centre + potential_at(backward)) /
+        (kCurvatureStep * kCurvatureStep);
+    }
+    crane_model::QU corners = best;
+    corners[0] += kCurvatureStep;
+    corners[1] += kCurvatureStep;
+    const double plus_plus = potential_at(corners);
+    corners[1] = best[1] - kCurvatureStep;
+    const double plus_minus = potential_at(corners);
+    corners[0] = best[0] - kCurvatureStep;
+    const double minus_minus = potential_at(corners);
+    corners[1] = best[1] + kCurvatureStep;
+    const double minus_plus = potential_at(corners);
+    curvature(0, 1) = (plus_plus - plus_minus - minus_plus + minus_minus) /
+      (4.0 * kCurvatureStep * kCurvatureStep);
+    curvature(1, 0) = curvature(0, 1);
+
+    const Eigen::Vector2d step = curvature.ldlt().solve(gradient);
+    best -= step;
+    if (step.norm() < 1.0e-13) {
+      break;
+    }
+  }
+  return best;
+}
+
+}  // namespace energy
+
+// A crane holding the tool out at radius, well away from any joint zero, so
+// every coupling term in M and h is populated. The two passive coordinates are
+// deliberately off their equilibrium: the invariant tests put them back.
+crane_model::Q loaded_configuration()
+{
+  crane_model::Q q;
+  q << 0.4, 0.35, 0.9, 0.8, 0.12, 1.4, 0.6, 0.3;
+  return q;
+}
+
+crane_model::DQ loaded_velocity()
+{
+  crane_model::DQ dq;
+  dq << 0.30, 0.12, -0.20, 0.08, 0.25, -0.18, 0.40, 0.05;
+  return dq;
+}
+
+// A payload that is a payload: the concrete block of the PZS100, offset from the
+// tool axis and carrying a real tensor about its own centre of mass.
+crane_model::Payload block_payload()
+{
+  crane_model::Payload payload;
+  payload.valid = true;
+  payload.mass_kg = 220.0;
+  payload.center_of_mass_k8_m = Eigen::Vector3d(0.04, -0.03, 0.55);
+  payload.inertia_k8_kg_m2 = Eigen::Vector3d(18.0, 22.0, 9.0).asDiagonal();
+  return payload;
+}
+
+// The empty gripper: contract §4 spells it as a *declared* payload of zero mass,
+// which is not the same statement as `valid == false`.
+crane_model::Payload empty_gripper()
+{
+  crane_model::Payload payload;
+  payload.valid = true;
+  payload.mass_kg = 0.0;
+  payload.center_of_mass_k8_m.setZero();
+  payload.inertia_k8_kg_m2.setZero();
+  return payload;
+}
+
+crane_model::Result<crane_model::Model> model_with_gravity(
+  crane_model::Tool tool, const Eigen::Vector3d& gravity)
+{
+  crane_model::ModelConfig config;
+  config.robot_description_xml = description_for(tool);
+  config.tool = tool;
+  config.gravity_m_s2 = gravity;
+  return crane_model::Model::create(config);
+}
+
+const std::array<Eigen::Index, 6> kActuatedRows{{0, 1, 2, 3, 6, 7}};
+const std::array<Eigen::Index, 2> kPassiveRows{{4, 5}};
+
+crane_model::QU passive_rows(const crane_model::DQ& vector)
+{
+  crane_model::QU rows;
+  rows << vector[kPassiveRows[0]], vector[kPassiveRows[1]];
+  return rows;
+}
+
+crane_model::Vector6 actuated_rows(const crane_model::DQ& vector)
+{
+  crane_model::Vector6 rows;
+  for (Eigen::Index index = 0; index < 6; ++index) {
+    rows[index] = vector[kActuatedRows[static_cast<std::size_t>(index)]];
+  }
+  return rows;
+}
+
+crane_model::DQ full_acceleration(const crane_model::Input& ddq_a, const crane_model::QU& ddq_u)
+{
+  crane_model::DQ ddq = crane_model::DQ::Zero();
+  for (Eigen::Index index = 0; index < 6; ++index) {
+    ddq[kActuatedRows[static_cast<std::size_t>(index)]] = ddq_a[index];
+  }
+  ddq[kPassiveRows[0]] = ddq_u[0];
+  ddq[kPassiveRows[1]] = ddq_u[1];
+  return ddq;
+}
+
+// tau_a for one ddq_a, taken out of the *full* dynamics and nothing else: the
+// two passive rows of inverse_dynamics are affine in ddq_u, so three calls
+// determine them exactly, a fourth evaluates the torque at the ddq_u that makes
+// them vanish, and the actuated rows of that call are tau_a by definition. No
+// Schur complement appears anywhere in here, which is what makes it a check on
+// reduced_actuated_dynamics rather than a copy of it.
+crane_model::Vector6 consistent_actuated_torque(
+  const crane_model::Model& model, const crane_model::Q& q, const crane_model::DQ& dq,
+  const crane_model::Input& ddq_a, const crane_model::Payload& payload,
+  crane_model::QU * ddq_u_out = nullptr)
+{
+  const auto torque_at = [&](const crane_model::QU& ddq_u) {
+      const auto result = model.inverse_dynamics(q, dq, full_acceleration(ddq_a, ddq_u), payload);
+      EXPECT_TRUE(result.ok()) << result.status().message;
+      return result.ok() ? result.value() : crane_model::DQ::Zero().eval();
+    };
+
+  const crane_model::QU zero = crane_model::QU::Zero();
+  const crane_model::QU offset = passive_rows(torque_at(zero));
+  Eigen::Matrix2d passive_mass;
+  for (Eigen::Index column = 0; column < 2; ++column) {
+    crane_model::QU probe = crane_model::QU::Zero();
+    probe[column] = 1.0;
+    passive_mass.col(column) = passive_rows(torque_at(probe)) - offset;
+  }
+
+  const crane_model::QU ddq_u = passive_mass.partialPivLu().solve(-offset);
+  if (ddq_u_out != nullptr) {
+    *ddq_u_out = ddq_u;
+  }
+  const crane_model::DQ tau = torque_at(ddq_u);
+  EXPECT_LT(passive_rows(tau).norm(), 1.0e-6) << "the consistent acceleration left a passive row";
+  return actuated_rows(tau);
+}
+
+}  // namespace
+
+TEST(CraneModelDynamics, MassMatrixIsTheKineticEnergyOfTheSameDescription)
+{
+  // (1/2) dq^T M dq is the kinetic energy of the description, so M is checked
+  // against an algorithm that never forms a mass matrix. This is also what
+  // catches the two `<mimic>` joints: the second telescope stage and the
+  // PZS100's mirrored rail carry inertia, and their rows have to land on the
+  // coordinate that drives them.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    energy::Reference bare(tool, model.value().urdf_joint_names());
+    energy::Reference loaded(tool, model.value().urdf_joint_names());
+    loaded.add_payload(block_payload());
+
+    const auto q = loaded_configuration();
+    for (const double scale : {0.3, 1.0, 2.5}) {
+      const crane_model::DQ dq = scale * loaded_velocity();
+      for (const auto& carried : {empty_gripper(), block_payload()}) {
+        const auto dynamics = model.value().full_dynamics(q, dq, carried);
+        ASSERT_TRUE(dynamics.ok()) << dynamics.status().message;
+        const double expected =
+          carried.mass_kg > 0.0 ? loaded.kinetic(q, dq) : bare.kinetic(q, dq);
+        EXPECT_NEAR(0.5 * dq.dot(dynamics.value().mass * dq), expected, 1.0e-8 * expected);
+
+        // M is symmetric and positive definite, which is what makes the
+        // Cholesky of robot_model §3.1 and the Schur complement of §3.4 legal.
+        EXPECT_LT(
+          (dynamics.value().mass - dynamics.value().mass.transpose()).norm(),
+          1.0e-12 * dynamics.value().mass.norm());
+        const Eigen::LLT<crane_model::FullMass> factorisation(dynamics.value().mass);
+        EXPECT_EQ(factorisation.info(), Eigen::Success);
+      }
+    }
+  }
+}
+
+TEST(CraneModelDynamics, BiasIsTheGradientOfThePotentialEnergyAtRest)
+{
+  // At rest h is the gravity vector alone, and the gravity vector is the
+  // gradient of the potential energy -- again an energy, not a torque algorithm.
+  // The tolerance is the central difference's own error, not the model's.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    energy::Reference reference(tool, model.value().urdf_joint_names());
+    reference.add_payload(block_payload());
+
+    const auto q = loaded_configuration();
+    const auto dynamics = model.value().full_dynamics(q, crane_model::DQ::Zero(), block_payload());
+    ASSERT_TRUE(dynamics.ok()) << dynamics.status().message;
+    const crane_model::DQ expected = energy::gravity_gradient(reference, q);
+    for (Eigen::Index index = 0; index < 8; ++index) {
+      EXPECT_NEAR(dynamics.value().bias[index], expected[index], 1.0e-4) << "row " << index;
+    }
+    EXPECT_GT(expected.norm(), 1.0e3) << "the fixture is not carrying the crane's weight";
+  }
+}
+
+TEST(CraneModelDynamics, GravityComesFromTheConfigurationNotFromACompiledConstant)
+{
+  // ModelConfig::gravity_m_s2 is the only source. At rest the bias is linear in
+  // it, so half a gravity is exactly half a bias and a sideways gravity is a
+  // different vector entirely -- neither of which a compiled-in 9.81 could do.
+  const Eigen::Vector3d earth(0.0, 0.0, -9.81);
+  const auto standard = model_with_gravity(crane_model::Tool::Pzs100, earth);
+  const auto halved = model_with_gravity(crane_model::Tool::Pzs100, 0.5 * earth);
+  const auto sideways = model_with_gravity(crane_model::Tool::Pzs100, Eigen::Vector3d(0, -9.81, 0));
+  ASSERT_TRUE(standard.ok());
+  ASSERT_TRUE(halved.ok());
+  ASSERT_TRUE(sideways.ok());
+
+  const auto q = loaded_configuration();
+  const auto rest = crane_model::DQ::Zero();
+  const auto payload = block_payload();
+  const auto full = standard.value().full_dynamics(q, rest, payload);
+  const auto half = halved.value().full_dynamics(q, rest, payload);
+  const auto lateral = sideways.value().full_dynamics(q, rest, payload);
+  ASSERT_TRUE(full.ok());
+  ASSERT_TRUE(half.ok());
+  ASSERT_TRUE(lateral.ok());
+
+  EXPECT_LT(
+    (half.value().bias - 0.5 * full.value().bias).norm(), 1.0e-9 * full.value().bias.norm());
+  EXPECT_GT((lateral.value().bias - full.value().bias).norm(), 0.1 * full.value().bias.norm());
+  // The mass matrix is not a function of gravity, and must not become one.
+  EXPECT_LT((half.value().mass - full.value().mass).norm(), 1.0e-12 * full.value().mass.norm());
+}
+
+TEST(CraneModelDynamics, DampingIsTheDescriptionsExceptTheTelescope)
+{
+  // h is quadratic in dq and the gravity term does not depend on it at all, so
+  // the odd part of the bias in dq is exactly D dq. That extracts D through the
+  // public API without the test knowing how the model stores it.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    const auto q = loaded_configuration();
+    const auto dq = loaded_velocity();
+    const auto payload = block_payload();
+    const auto forward = model.value().full_dynamics(q, dq, payload);
+    const auto backward = model.value().full_dynamics(q, -dq, payload);
+    ASSERT_TRUE(forward.ok());
+    ASSERT_TRUE(backward.ok());
+    const crane_model::DQ damping_term = 0.5 * (forward.value().bias - backward.value().bias);
+
+    const ::urdf::ModelInterfaceSharedPtr tree = ::urdf::parseURDF(description_for(tool));
+    ASSERT_TRUE(static_cast<bool>(tree));
+    const auto& names = model.value().urdf_joint_names();
+    for (Eigen::Index index = 0; index < 8; ++index) {
+      const auto joint = tree->getJoint(names[static_cast<std::size_t>(index)]);
+      ASSERT_TRUE(static_cast<bool>(joint));
+      ASSERT_TRUE(static_cast<bool>(joint->dynamics));
+      // wiki/implementation/parameters.md §5: every axis takes the
+      // description's damping except q4, whose entry that note calls a
+      // simulation stability hack that must not enter the model.
+      const double expected = index == 3 ? 0.0 : joint->dynamics->damping * dq[index];
+      EXPECT_NEAR(damping_term[index], expected, 1.0e-6 * std::max(1.0, std::abs(expected)))
+        << "row " << index;
+    }
+    // And the carve-out is a real one: the description does carry a telescope
+    // damping, and it is large enough that leaving it in would show.
+    EXPECT_GT(tree->getJoint(names[3])->dynamics->damping, 1.0e4);
+  }
+}
+
+TEST(CraneModelDynamics, CentrifugalCouplingFromSlewingReachesThePassiveRows)
+{
+  // robot_model §3.1 warns against dropping the Coriolis terms because the
+  // centrifugal coupling from slewing into the sway grows with radius and rate.
+  // The coupling is exactly quadratic in the slewing rate, and the passive rows
+  // see no damping at all here because dq_u is zero, so the whole increment is
+  // the term the warning is about.
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  const auto q = loaded_configuration();
+  const auto payload = block_payload();
+
+  const auto at_rate = [&](double rate) {
+      crane_model::DQ dq = crane_model::DQ::Zero();
+      dq[0] = rate;
+      const auto dynamics = model.value().full_dynamics(q, dq, payload);
+      EXPECT_TRUE(dynamics.ok());
+      return dynamics.ok() ? passive_rows(dynamics.value().bias) :
+             crane_model::QU::Zero().eval();
+    };
+
+  const crane_model::QU still = at_rate(0.0);
+  const crane_model::QU single = at_rate(0.4) - still;
+  const crane_model::QU doubled = at_rate(0.8) - still;
+  EXPECT_GT(single.norm(), 1.0) << "slewing does not reach the passive rows at all";
+  EXPECT_LT((doubled - 4.0 * single).norm(), 1.0e-9 * doubled.norm());
+}
+
+TEST(CraneModelDynamics, PassiveRowsVanishAtTheEquilibrium)
+{
+  // The invariant of contract §7 and robot_model §3.3. The equilibrium is
+  // located by minimising the potential energy of the same description, which is
+  // a criterion the model under test never evaluates, so this is a check on the
+  // whole chain -- joint map, mimics, payload attachment, gravity -- and not a
+  // tautology.
+  //
+  // The tolerance is the search's, not the model's. Near the minimum the passive
+  // gravity torque is the curvature of U times the offset of the located point,
+  // and that offset is set by the noise of a central difference on an energy of
+  // order 1e5 J, which predicts a residual of order 1e-6 N m. Measured on these
+  // two descriptions it is 3e-7 to 7e-7 N m, against a restoring torque of 32 to
+  // 80 N m one degree off the same equilibrium -- so the rows are zero to about
+  // 1e-8 of the scale they are zero against. 1e-4 N m is two decades of margin
+  // over the measured value and is the approved tolerance.
+  constexpr double kPassiveResidual = 1.0e-4;
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    for (const auto& payload : {empty_gripper(), block_payload()}) {
+      energy::Reference reference(tool, model.value().urdf_joint_names());
+      reference.add_payload(payload);
+
+      crane_model::Q q = loaded_configuration();
+      const crane_model::QU settled = energy::equilibrium(reference, q);
+      q[4] = settled[0];
+      q[5] = settled[1];
+
+      const auto tau = model.value().inverse_dynamics(
+        q, crane_model::DQ::Zero(), crane_model::DQ::Zero(), payload);
+      ASSERT_TRUE(tau.ok()) << tau.status().message;
+      EXPECT_LT(passive_rows(tau.value()).norm(), kPassiveResidual)
+        << "tau_u = " << passive_rows(tau.value()).transpose();
+
+      // Not vacuously zero: a degree away from the equilibrium the same rows
+      // carry the restoring torque the invariant is zero against, which is
+      // eight decades above the residual above.
+      crane_model::Q tilted = q;
+      tilted[5] += M_PI / 180.0;
+      const auto off = model.value().inverse_dynamics(
+        tilted, crane_model::DQ::Zero(), crane_model::DQ::Zero(), payload);
+      ASSERT_TRUE(off.ok());
+      EXPECT_GT(passive_rows(off.value()).norm(), 1.0e1);
+
+      // And the actuated rows are not zero at the same point: holding the crane
+      // up against gravity is what they are for.
+      EXPECT_GT(actuated_rows(tau.value()).norm(), 1.0e3);
+    }
+  }
+}
+
+TEST(CraneModelDynamics, AnOffsetGraspMovesThePassiveEquilibrium)
+{
+  // robot_model §5.1. The passive joints hold the tool so the combined centre of
+  // mass hangs under the pivot, so a grasp that is not centred tilts the tool at
+  // rest. This is the property issue 033's payload estimate is observable
+  // through, which is why it is asserted here rather than assumed there.
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  const auto& names = model.value().urdf_joint_names();
+
+  const auto settled_with = [&](const Eigen::Vector3d& centre) {
+      crane_model::Payload payload = block_payload();
+      payload.center_of_mass_k8_m = centre;
+      energy::Reference reference(crane_model::Tool::Pzs100, names);
+      reference.add_payload(payload);
+      const crane_model::QU settled = energy::equilibrium(reference, loaded_configuration());
+
+      // The model has to agree that this is an equilibrium, which is what ties
+      // the shift to the payload attachment rather than to the reference alone.
+      crane_model::Q q = loaded_configuration();
+      q[4] = settled[0];
+      q[5] = settled[1];
+      const auto tau = model.value().inverse_dynamics(
+        q, crane_model::DQ::Zero(), crane_model::DQ::Zero(), payload);
+      EXPECT_TRUE(tau.ok());
+      EXPECT_LT(passive_rows(tau.value()).norm(), 1.0e-4);
+      return settled;
+    };
+
+  const Eigen::Vector3d centred(0.0, 0.0, 0.55);
+  const crane_model::QU nominal = settled_with(centred);
+  const crane_model::QU small = settled_with(centred + Eigen::Vector3d(0.05, 0.0, 0.0));
+  const crane_model::QU large = settled_with(centred + Eigen::Vector3d(0.10, 0.0, 0.0));
+  const crane_model::QU across = settled_with(centred + Eigen::Vector3d(0.0, 0.05, 0.0));
+
+  // 5 cm of offset is worth degrees, not arcseconds: §5.1 puts it at
+  // arctan(d / l_tool) ~ 2.9 deg for a metre of effective pendulum, and calls
+  // that the whole placement budget.
+  const double shift = (small - nominal).norm();
+  EXPECT_GT(shift, 1.0 * M_PI / 180.0) << "an offset grasp barely moved the equilibrium";
+  EXPECT_LT(shift, 10.0 * M_PI / 180.0);
+  // Twice the offset is close to twice the tilt, and the two axes move
+  // differently: the double hinge is not a single pendulum.
+  EXPECT_NEAR((large - nominal).norm() / shift, 2.0, 0.2);
+  EXPECT_GT((across - small).norm(), 0.5 * shift);
+}
+
+TEST(CraneModelDynamics, ThePayloadIsTheBodyRobotModelSaysItIs)
+{
+  // robot_model §5: a rigid body attached to K8_rotator_lower_part, with m_L,
+  // r_L^(8) and Theta_L in that frame. What it adds to M and to the gravity
+  // term is then fixed by the frame's own Jacobian, which the public API
+  // already returns -- so this checks the attachment point, the frame the two
+  // geometric quantities are read in, and the convention that Theta_L is about
+  // the payload's own centre of mass, with no second model anywhere.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    const auto q = loaded_configuration();
+    const auto dq = crane_model::DQ::Zero();
+    const auto payload = block_payload();
+
+    const auto jacobian = model.value().jacobian(q, crane_model::Frame::RotatorLowerPart);
+    ASSERT_TRUE(jacobian.ok()) << jacobian.status().message;
+    const auto pose = model.value().forward_kinematics(
+      q, crane_model::Frame::MountingBase, crane_model::Frame::RotatorLowerPart);
+    ASSERT_TRUE(pose.ok());
+
+    // The Jacobian of the payload's centre of mass, in K8: a point rigidly
+    // attached to the frame moves with v - r x omega.
+    const Eigen::Matrix<double, 3, 8> linear = jacobian.value().value.topRows<3>();
+    const Eigen::Matrix<double, 3, 8> angular = jacobian.value().value.bottomRows<3>();
+    Eigen::Matrix3d lever;
+    const Eigen::Vector3d& r = payload.center_of_mass_k8_m;
+    lever << 0.0, -r.z(), r.y(), r.z(), 0.0, -r.x(), -r.y(), r.x(), 0.0;
+    const Eigen::Matrix<double, 3, 8> centre_of_mass = linear - lever * angular;
+
+    const auto bare = model.value().full_dynamics(q, dq, empty_gripper());
+    const auto loaded = model.value().full_dynamics(q, dq, payload);
+    ASSERT_TRUE(bare.ok());
+    ASSERT_TRUE(loaded.ok());
+
+    // Koenig: the payload's kinetic energy is its centre of mass plus its
+    // rotation about it, so Theta_L never picks up a parallel-axis term.
+    const crane_model::FullMass expected_mass =
+      payload.mass_kg * centre_of_mass.transpose() * centre_of_mass +
+      angular.transpose() * payload.inertia_k8_kg_m2 * angular;
+    const crane_model::FullMass mass_increment = loaded.value().mass - bare.value().mass;
+    EXPECT_LT((mass_increment - expected_mass).norm(), 1.0e-9 * expected_mass.norm())
+      << "the payload does not add the inertia of a body at K8";
+
+    // And the gravity term it adds is the weight of that same point, carried
+    // back through the same Jacobian. K8's rotation turns g into the frame the
+    // Jacobian is expressed in.
+    const Eigen::Vector3d gravity_in_k8 =
+      pose.value().orientation.toRotationMatrix().transpose() * Eigen::Vector3d(0.0, 0.0, -9.81);
+    const crane_model::DQ expected_bias =
+      -payload.mass_kg * centre_of_mass.transpose() * gravity_in_k8;
+    const crane_model::DQ bias_increment = loaded.value().bias - bare.value().bias;
+    EXPECT_LT((bias_increment - expected_bias).norm(), 1.0e-9 * expected_bias.norm())
+      << "the payload does not hang where robot_model §5 puts it";
+    EXPECT_GT(expected_bias.norm(), 1.0e2);
+  }
+}
+
+TEST(CraneModelDynamics, ThePayloadIsValidatedAndNotRepaired)
+{
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  const auto q = loaded_configuration();
+  const auto dq = crane_model::DQ::Zero();
+  const auto invalid = crane_model::ErrorCode::InvalidPayload;
+
+  const auto refuses = [&](const crane_model::Payload& payload, const char * why) {
+      EXPECT_EQ(model.value().full_dynamics(q, dq, payload).status().code, invalid) << why;
+      EXPECT_EQ(model.value().inverse_dynamics(q, dq, dq, payload).status().code, invalid) << why;
+      EXPECT_EQ(
+        model.value().reduced_actuated_dynamics(
+          q, dq, crane_model::Input::Zero(), payload).status().code, invalid) << why;
+    };
+
+  // Contract §4: an undeclared payload is an explicit unknown, and an unknown is
+  // refused rather than silently answered as if the gripper were empty.
+  refuses(crane_model::Payload{}, "valid == false");
+
+  crane_model::Payload negative = block_payload();
+  negative.mass_kg = -1.0;
+  refuses(negative, "negative mass");
+
+  crane_model::Payload infinite = block_payload();
+  infinite.mass_kg = std::numeric_limits<double>::infinity();
+  refuses(infinite, "non-finite mass");
+
+  crane_model::Payload not_a_number = block_payload();
+  not_a_number.center_of_mass_k8_m[1] = std::numeric_limits<double>::quiet_NaN();
+  refuses(not_a_number, "non-finite centre of mass");
+
+  crane_model::Payload asymmetric = block_payload();
+  asymmetric.inertia_k8_kg_m2(0, 1) = 1.0;
+  refuses(asymmetric, "asymmetric inertia");
+
+  crane_model::Payload indefinite = block_payload();
+  indefinite.inertia_k8_kg_m2(2, 2) = -9.0;
+  refuses(indefinite, "inertia that is not positive semi-definite");
+
+  // A declared payload of zero mass is a statement and is accepted, including
+  // the point-mass case where Theta_L is zero.
+  EXPECT_TRUE(model.value().full_dynamics(q, dq, empty_gripper()).ok());
+  crane_model::Payload point_mass = block_payload();
+  point_mass.inertia_k8_kg_m2.setZero();
+  EXPECT_TRUE(model.value().full_dynamics(q, dq, point_mass).ok());
+
+  // And it is not the same object as an empty gripper: a zero-mass body still
+  // carrying a tensor is a different mass matrix, so nothing here is collapsing
+  // a payload to its mass.
+  crane_model::Payload weightless = empty_gripper();
+  weightless.inertia_k8_kg_m2 = Eigen::Vector3d(18.0, 22.0, 9.0).asDiagonal();
+  const auto empty = model.value().full_dynamics(q, dq, empty_gripper());
+  const auto spinning = model.value().full_dynamics(q, dq, weightless);
+  ASSERT_TRUE(empty.ok());
+  ASSERT_TRUE(spinning.ok());
+  EXPECT_GT((spinning.value().mass - empty.value().mass).norm(), 1.0);
+}
+
+TEST(CraneModelDynamics, ReducedActuatedDynamicsIsTheReductionOfTheFullDynamics)
+{
+  // robot_model §3.4, proved against the full dynamics rather than against a
+  // second Schur complement. tau_a(ddq_a) is recovered from inverse_dynamics
+  // alone, by solving the passive rows to zero; it is affine in ddq_a, so its
+  // value at zero is h_eff and its six increments are the columns of M_eff.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    const auto q = loaded_configuration();
+    const auto dq = loaded_velocity();
+    const auto payload = block_payload();
+
+    const crane_model::Vector6 at_rest = consistent_actuated_torque(
+      model.value(), q, dq, crane_model::Input::Zero(), payload);
+    crane_model::ReducedMass expected_mass;
+    for (Eigen::Index column = 0; column < 6; ++column) {
+      crane_model::Input ddq_a = crane_model::Input::Zero();
+      ddq_a[column] = 1.0;
+      expected_mass.col(column) =
+        consistent_actuated_torque(model.value(), q, dq, ddq_a, payload) - at_rest;
+    }
+
+    const auto reduced = model.value().reduced_actuated_dynamics(
+      q, dq, crane_model::Input::Zero(), payload);
+    ASSERT_TRUE(reduced.ok()) << reduced.status().message;
+    EXPECT_LT(
+      (reduced.value().mass_eff - expected_mass).norm(), 1.0e-8 * expected_mass.norm());
+    EXPECT_LT((reduced.value().bias_eff - at_rest).norm(), 1.0e-8 * at_rest.norm());
+
+    // ddq_a is validated and does not change the reduction: M_eff and h_eff are
+    // properties of (q, dq, payload), and tau_a = M_eff ddq_a + h_eff is the
+    // caller's product to form.
+    const auto accelerating = model.value().reduced_actuated_dynamics(
+      q, dq, crane_model::Input::Constant(0.7), payload);
+    ASSERT_TRUE(accelerating.ok());
+    EXPECT_EQ(accelerating.value().mass_eff, reduced.value().mass_eff);
+    EXPECT_EQ(accelerating.value().bias_eff, reduced.value().bias_eff);
+
+    // §3.4: the effective inertia is strictly smaller than M_aa, because the
+    // pendulum absorbs part of the acceleration instead of transmitting it.
+    const auto full = model.value().full_dynamics(q, dq, payload);
+    ASSERT_TRUE(full.ok());
+    crane_model::ReducedMass actuated_block;
+    for (Eigen::Index row = 0; row < 6; ++row) {
+      for (Eigen::Index column = 0; column < 6; ++column) {
+        actuated_block(row, column) = full.value().mass(
+          kActuatedRows[static_cast<std::size_t>(row)],
+          kActuatedRows[static_cast<std::size_t>(column)]);
+      }
+    }
+    const crane_model::ReducedMass absorbed = actuated_block - reduced.value().mass_eff;
+    const Eigen::SelfAdjointEigenSolver<crane_model::ReducedMass> spectrum(absorbed);
+    EXPECT_GT(spectrum.eigenvalues().minCoeff(), -1.0e-9 * absorbed.norm());
+    EXPECT_GT(spectrum.eigenvalues().maxCoeff(), 1.0);
+  }
+}
+
+TEST(CraneModelDynamics, FullDynamicsCarriesTheConsistentInverseDynamicsTorque)
+{
+  // The frozen struct carries an inverse-dynamics torque but no acceleration to
+  // evaluate it at. The one the model supplies is the consistent one of §3.1
+  // with ddq_a = 0 -- the torque holding the actuated axes still while the
+  // pendulum swings freely -- so its passive rows vanish and its actuated rows
+  // are h_eff. Reporting tau at ddq = 0 instead would make the field a copy of
+  // `bias`, and this is what says which of the two it is.
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  const auto q = loaded_configuration();
+  const auto dq = loaded_velocity();
+  const auto payload = block_payload();
+
+  const auto full = model.value().full_dynamics(q, dq, payload);
+  ASSERT_TRUE(full.ok());
+  const auto reduced = model.value().reduced_actuated_dynamics(
+    q, dq, crane_model::Input::Zero(), payload);
+  ASSERT_TRUE(reduced.ok());
+
+  EXPECT_LT(passive_rows(full.value().inverse_dynamics_tau).norm(), 1.0e-9);
+  EXPECT_LT(
+    (actuated_rows(full.value().inverse_dynamics_tau) - reduced.value().bias_eff).norm(),
+    1.0e-9 * reduced.value().bias_eff.norm());
+  EXPECT_GT(full.value().inverse_dynamics_tau.norm(), 1.0e3);
+
+  // It is a torque and not the bias: the pendulum's free acceleration is a real
+  // term, so the two differ by more than rounding.
+  EXPECT_GT(
+    (full.value().inverse_dynamics_tau - full.value().bias).norm(),
+    1.0e-3 * full.value().bias.norm());
+
+  // And the same number comes back out of inverse_dynamics at the acceleration
+  // the reduction eliminated.
+  crane_model::QU ddq_u = crane_model::QU::Zero();
+  const crane_model::Vector6 tau_a = consistent_actuated_torque(
+    model.value(), q, dq, crane_model::Input::Zero(), payload, &ddq_u);
+  EXPECT_LT((tau_a - actuated_rows(full.value().inverse_dynamics_tau)).norm(), 1.0e-8);
+  EXPECT_GT(ddq_u.norm(), 1.0e-3) << "the pendulum is not accelerating at all in this fixture";
+}
+
+TEST(CraneModelDynamics, NonFiniteAndUnusableConfigurationsAreRefused)
+{
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  const auto payload = block_payload();
+  const auto q = loaded_configuration();
+  const auto dq = loaded_velocity();
+  const auto non_finite = crane_model::ErrorCode::NonFiniteInput;
+
+  crane_model::Q bad_q = q;
+  bad_q[2] = std::numeric_limits<double>::quiet_NaN();
+  crane_model::DQ bad_dq = dq;
+  bad_dq[5] = std::numeric_limits<double>::infinity();
+
+  EXPECT_EQ(model.value().full_dynamics(bad_q, dq, payload).status().code, non_finite);
+  EXPECT_EQ(model.value().full_dynamics(q, bad_dq, payload).status().code, non_finite);
+  EXPECT_EQ(model.value().inverse_dynamics(bad_q, dq, dq, payload).status().code, non_finite);
+  EXPECT_EQ(model.value().inverse_dynamics(q, bad_dq, dq, payload).status().code, non_finite);
+  EXPECT_EQ(model.value().inverse_dynamics(q, dq, bad_dq, payload).status().code, non_finite);
+  EXPECT_EQ(
+    model.value().reduced_actuated_dynamics(bad_q, dq, crane_model::Input::Zero(), payload)
+      .status().code, non_finite);
+  EXPECT_EQ(
+    model.value().reduced_actuated_dynamics(
+      q, dq, crane_model::Input::Constant(std::numeric_limits<double>::quiet_NaN()), payload)
+      .status().code, non_finite);
+
+  // A configuration that is finite but at which the description cannot produce
+  // finite numbers -- the telescope run out to 1e200 m -- is reported as such
+  // rather than answered with a matrix of infinities.
+  crane_model::Q overflowing = q;
+  overflowing[3] = 1.0e200;
+  const auto singular = crane_model::ErrorCode::SingularConfiguration;
+  EXPECT_EQ(model.value().full_dynamics(overflowing, dq, payload).status().code, singular);
+  EXPECT_EQ(model.value().inverse_dynamics(overflowing, dq, dq, payload).status().code, singular);
+  EXPECT_EQ(
+    model.value().reduced_actuated_dynamics(
+      overflowing, dq, crane_model::Input::Zero(), payload).status().code, singular);
 }
 
 // --- collision ---------------------------------------------------------------
