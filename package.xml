@@ -10,6 +10,7 @@
   <build_depend>eigen</build_depend>
   <exec_depend>eigen</exec_depend>
   <depend>pinocchio</depend>
+  <depend>coal</depend>
   <test_depend>ament_cmake_gtest</test_depend>
 
   <export>

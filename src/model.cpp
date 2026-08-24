@@ -2,10 +2,16 @@
 
 #include <urdf_parser/urdf_parser.h>
 
+#include <coal/collision_object.h>
+#include <coal/distance.h>
+#include <coal/shape/geometric_shapes.h>
+
 #include <algorithm>
 #include <cmath>
 #include <exception>
 #include <iterator>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -16,6 +22,8 @@
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
+
+#include "collision_model.hpp"
 
 namespace crane_model
 {
@@ -488,6 +496,199 @@ Status bind_joint(const pinocchio::Model& model, const std::string& name, JointS
   return Status{};
 }
 
+// --- the collision model -----------------------------------------------------
+//
+// wiki/trajectory_planning.md §4.2: one model, one library, one URDF. Pinocchio
+// places the links and Coal answers the queries, over the geometry
+// src/collision_model.hpp carries and over the `CollisionScene` the caller
+// supplies. Contract §8 puts the world-to-K0 conversion at the world-model
+// boundary, so the scene arrives in `K0_mounting_base` and every pose and
+// witness point below is in that frame.
+
+using collision_model::kAllowedSelfPairs;
+using collision_model::kLinkPrimitives;
+using collision_model::LinkPrimitive;
+using collision_model::LinkShape;
+
+// The reserved scene id of a payload the tool is carrying. The frozen collision
+// signature takes `q` and a scene and no `Payload`, so a carried payload reaches
+// the model the only way it can: as a scene primitive, at the pose the caller
+// reads out of forward_kinematics. What the model owes it is the half a caller
+// cannot supply -- the primitive is not checked against the links that hold it,
+// which is what "attached to K8" means for a collision model. README says so.
+constexpr const char * kPayloadId = "payload";
+
+// How a self-collision names the other side in `CollisionResult::other_id`.
+constexpr char kSelfPairSeparator = '|';
+
+// `dimensions_m` is the primitive's extent along each axis of its own frame, so
+// a box carries its side lengths, a cylinder (2r, 2r, length) and a sphere its
+// diameter three times. The contract does not fix this; the model does, and it
+// checks it: a cylinder or sphere whose extents disagree is `InvalidScene` and
+// not a silently reinterpreted radius.
+constexpr double kExtentTolerance = 1.0e-9;
+// A scene rotation has to be a rotation. Message round-trips lose a few bits,
+// so this is loose enough for float, tight enough to catch a scaled basis.
+constexpr double kRotationTolerance = 1.0e-6;
+
+std::shared_ptr<coal::CollisionGeometry> link_geometry(const LinkPrimitive& entry)
+{
+  if (entry.shape == LinkShape::Capsule) {
+    return std::make_shared<coal::Capsule>(entry.extents_m[0], 2.0 * entry.extents_m[1]);
+  }
+  return std::make_shared<coal::Box>(
+    2.0 * entry.extents_m[0], 2.0 * entry.extents_m[1], 2.0 * entry.extents_m[2]);
+}
+
+pinocchio::SE3 primitive_placement(const LinkPrimitive& entry)
+{
+  const Eigen::Quaterniond orientation(
+    entry.orientation[3], entry.orientation[0], entry.orientation[1], entry.orientation[2]);
+  return pinocchio::SE3(
+    orientation.normalized().toRotationMatrix(),
+    Eigen::Vector3d(entry.origin_m[0], entry.origin_m[1], entry.origin_m[2]));
+}
+
+coal::Transform3s coal_transform(const pinocchio::SE3& placement)
+{
+  return coal::Transform3s(placement.rotation(), placement.translation());
+}
+
+bool self_pair_is_allowed(const std::string& first, const std::string& second)
+{
+  return std::any_of(
+    kAllowedSelfPairs.begin(), kAllowedSelfPairs.end(),
+    [&first, &second](const collision_model::LinkPair& pair) {
+      return (first == pair.first && second == pair.second) ||
+             (first == pair.second && second == pair.first);
+    });
+}
+
+// One scene primitive, validated and turned into geometry Coal can answer for.
+struct SceneBody
+{
+  const CollisionPrimitive * primitive{nullptr};
+  std::shared_ptr<coal::CollisionGeometry> geometry;
+  coal::Transform3s pose;
+  bool payload{false};
+};
+
+Status scene_geometry(
+  const CollisionPrimitive& primitive, std::shared_ptr<coal::CollisionGeometry>& geometry)
+{
+  const Eigen::Vector3d& extents = primitive.dimensions_m;
+  if ((extents.array() <= 0.0).any()) {
+    return failure(
+      ErrorCode::InvalidScene,
+      "collision primitive " + primitive.id + " has a non-positive extent");
+  }
+  switch (primitive.shape) {
+    case CollisionShape::Box:
+      geometry = std::make_shared<coal::Box>(extents.x(), extents.y(), extents.z());
+      return Status{};
+    case CollisionShape::Cylinder:
+      if (std::abs(extents.x() - extents.y()) > kExtentTolerance * extents.x()) {
+        return failure(
+          ErrorCode::InvalidScene,
+          "cylinder " + primitive.id + " needs equal x and y extents, both its diameter");
+      }
+      geometry = std::make_shared<coal::Cylinder>(0.5 * extents.x(), extents.z());
+      return Status{};
+    case CollisionShape::Sphere:
+      if (std::abs(extents.x() - extents.y()) > kExtentTolerance * extents.x() ||
+        std::abs(extents.x() - extents.z()) > kExtentTolerance * extents.x())
+      {
+        return failure(
+          ErrorCode::InvalidScene,
+          "sphere " + primitive.id + " needs three equal extents, all its diameter");
+      }
+      geometry = std::make_shared<coal::Sphere>(0.5 * extents.x());
+      return Status{};
+    default:
+      break;
+  }
+  return failure(
+    ErrorCode::InvalidScene,
+    "collision primitive " + primitive.id + " has a shape that is not a CollisionShape value");
+}
+
+// Contract §4: an unusable primitive is refused, never skipped, so one bad entry
+// fails the whole scene rather than quietly shrinking it.
+Status build_scene(const CollisionScene& scene, std::vector<SceneBody>& bodies)
+{
+  bodies.clear();
+  bodies.reserve(scene.primitives.size());
+  for (const CollisionPrimitive& primitive : scene.primitives) {
+    if (primitive.id.empty()) {
+      return failure(ErrorCode::InvalidScene, "a collision primitive has an empty id");
+    }
+    const bool duplicate = std::any_of(
+      bodies.begin(), bodies.end(),
+      [&primitive](const SceneBody& body) {return body.primitive->id == primitive.id;});
+    if (duplicate) {
+      return failure(
+        ErrorCode::InvalidScene, "collision primitive id " + primitive.id + " is used twice");
+    }
+    if (!finite(primitive.pose_in_mounting_base.matrix()) || !finite(primitive.dimensions_m)) {
+      return failure(
+        ErrorCode::InvalidScene,
+        "collision primitive " + primitive.id + " has a non-finite pose or extent");
+    }
+    const Eigen::Matrix3d rotation = primitive.pose_in_mounting_base.linear();
+    const double orthonormal =
+      (rotation.transpose() * rotation - Eigen::Matrix3d::Identity()).norm();
+    if (orthonormal > kRotationTolerance || rotation.determinant() < 0.0) {
+      return failure(
+        ErrorCode::InvalidScene,
+        "collision primitive " + primitive.id + " carries a pose that is not a rotation");
+    }
+
+    SceneBody body;
+    body.primitive = &primitive;
+    body.payload = primitive.id == kPayloadId;
+    Status status = scene_geometry(primitive, body.geometry);
+    if (!status.ok()) {
+      return status;
+    }
+    body.pose = coal::Transform3s(rotation, primitive.pose_in_mounting_base.translation());
+    bodies.push_back(std::move(body));
+  }
+  return Status{};
+}
+
+// One Coal query, in K0. `enable_signed_distance` is what makes the result
+// usable on both sides of contact: the distance stays a real number when the two
+// overlap, and the witness points stay the pair that realises it.
+Status pair_distance(
+  const coal::CollisionGeometry * robot, const coal::Transform3s& robot_pose,
+  const coal::CollisionGeometry * other, const coal::Transform3s& other_pose,
+  std::string other_id, CollisionResult& out)
+{
+  coal::DistanceRequest request;
+  request.enable_signed_distance = true;
+  coal::DistanceResult result;
+  try {
+    coal::distance(robot, robot_pose, other, other_pose, request, result);
+  } catch (const std::exception& error) {
+    return failure(
+      ErrorCode::CollisionBackendFailure,
+      "Coal failed the query against " + other_id + ": " + error.what());
+  }
+  if (!std::isfinite(result.min_distance) || !finite(result.nearest_points[0]) ||
+    !finite(result.nearest_points[1]))
+  {
+    return failure(
+      ErrorCode::CollisionBackendFailure,
+      "Coal returned no usable distance for " + other_id);
+  }
+  out.collision = result.min_distance < 0.0;
+  out.minimum_distance_m = result.min_distance;
+  out.other_id = std::move(other_id);
+  out.witness_on_robot_m = result.nearest_points[0];
+  out.witness_on_other_m = result.nearest_points[1];
+  return Status{};
+}
+
 }  // namespace
 
 struct SymbolicGraph::Impl
@@ -556,6 +757,20 @@ struct Model::Impl
   std::array<pinocchio::FrameIndex, kFrameCount> frames{};
   std::array<bool, kFrameCount> frame_present{};
 
+  // One fitted primitive, bound to the link frame of the parsed description.
+  struct Body
+  {
+    std::string link;
+    pinocchio::FrameIndex frame{0};
+    std::shared_ptr<coal::CollisionGeometry> geometry;
+    pinocchio::SE3 placement{pinocchio::SE3::Identity()};
+    bool tool_side{false};  // distal to the rotator, so it is what holds a payload
+  };
+
+  std::vector<Body> bodies;
+  std::vector<std::pair<std::size_t, std::size_t>> self_pairs;
+  std::vector<std::string> unshaped_links;
+
   Status require_frame(Frame frame) const
   {
     const std::size_t index = static_cast<std::size_t>(frame);
@@ -592,6 +807,118 @@ struct Model::Impl
         joint.slot,
         joint.multiplier * q[static_cast<Eigen::Index>(joint.source)] + joint.offset);
     }
+  }
+
+  // The fit is for this machine. A description that does not carry every link it
+  // was fitted to would answer with a crane that is missing parts, which is
+  // worse than not answering; contract §5 says so rather than substituting.
+  Status require_collision_model() const
+  {
+    if (!unshaped_links.empty()) {
+      return failure(
+        ErrorCode::CollisionBackendFailure,
+        "the robot description carries no link " + unshaped_links.front() +
+        ", which the collision model is fitted to");
+    }
+    if (bodies.empty() || self_pairs.empty()) {
+      return failure(
+        ErrorCode::CollisionBackendFailure, "the collision model carries nothing to check");
+    }
+    return Status{};
+  }
+
+  // Every body's primitive, placed in K0_mounting_base. The scene is already in
+  // that frame (contract §8), so this is the only transform the query needs.
+  Status place_bodies(const Q& q, std::vector<coal::Transform3s>& poses)
+  {
+    Status status = require_frame(Frame::MountingBase);
+    if (!status.ok()) {
+      return status;
+    }
+    const pinocchio::FrameIndex base = frames[static_cast<std::size_t>(Frame::MountingBase)];
+    write_configuration(q);
+    pinocchio::forwardKinematics(model, data, configuration);
+    pinocchio::updateFramePlacement(model, data, base);
+    poses.clear();
+    poses.reserve(bodies.size());
+    for (const Body& body : bodies) {
+      pinocchio::updateFramePlacement(model, data, body.frame);
+      poses.push_back(
+        coal_transform(data.oMf[base].actInv(data.oMf[body.frame]) * body.placement));
+    }
+    return Status{};
+  }
+
+  // One result per scene primitive, in scene order, and then one for the crane
+  // against itself. Dynamically sized, so contract §10 keeps it off the RT path.
+  Status collide(const Q& q, const CollisionScene& scene, std::vector<CollisionResult>& results)
+  {
+    if (!finite(q)) {
+      return failure(ErrorCode::NonFiniteInput, "q is not finite");
+    }
+    Status status = require_collision_model();
+    if (!status.ok()) {
+      return status;
+    }
+    std::vector<SceneBody> scene_bodies;
+    status = build_scene(scene, scene_bodies);
+    if (!status.ok()) {
+      return status;
+    }
+    std::vector<coal::Transform3s> poses;
+    status = place_bodies(q, poses);
+    if (!status.ok()) {
+      return status;
+    }
+
+    results.clear();
+    results.reserve(scene_bodies.size() + 1);
+    CollisionResult candidate;
+    for (const SceneBody& other : scene_bodies) {
+      CollisionResult closest;
+      bool found = false;
+      for (std::size_t index = 0; index < bodies.size(); ++index) {
+        // The payload is carried by the tool, so the links holding it are not
+        // an obstacle to it. Everything else on the crane still is.
+        if (other.payload && bodies[index].tool_side) {
+          continue;
+        }
+        status = pair_distance(
+          bodies[index].geometry.get(), poses[index], other.geometry.get(), other.pose,
+          other.primitive->id, candidate);
+        if (!status.ok()) {
+          return status;
+        }
+        if (!found || candidate.minimum_distance_m < closest.minimum_distance_m) {
+          closest = candidate;
+          found = true;
+        }
+      }
+      if (!found) {
+        return failure(
+          ErrorCode::InvalidScene,
+          "primitive " + other.primitive->id + " is left with nothing to be checked against");
+      }
+      results.push_back(std::move(closest));
+    }
+
+    CollisionResult self;
+    bool found = false;
+    for (const std::pair<std::size_t, std::size_t>& pair : self_pairs) {
+      status = pair_distance(
+        bodies[pair.first].geometry.get(), poses[pair.first],
+        bodies[pair.second].geometry.get(), poses[pair.second],
+        bodies[pair.first].link + kSelfPairSeparator + bodies[pair.second].link, candidate);
+      if (!status.ok()) {
+        return status;
+      }
+      if (!found || candidate.minimum_distance_m < self.minimum_distance_m) {
+        self = candidate;
+        found = true;
+      }
+    }
+    results.push_back(std::move(self));
+    return Status{};
   }
 };
 
@@ -679,6 +1006,50 @@ Result<Model> Model::create(const ModelConfig& config)
     const bool present = impl->model.existFrame(kFrameLinks[index].link);
     impl->frame_present[index] = present;
     impl->frames[index] = present ? impl->model.getFrameId(kFrameLinks[index].link) : 0U;
+  }
+
+  // The collision model. Building it is construction work, not query work
+  // (contract §10), and a description that carries none of these links is not
+  // refused here -- only a collision call needs them, and a caller that never
+  // makes one is entitled to a model.
+  for (const LinkPrimitive& entry : kLinkPrimitives) {
+    if (entry.tool != config.tool) {
+      continue;
+    }
+    if (!impl->model.existFrame(entry.link)) {
+      impl->unshaped_links.emplace_back(entry.link);
+      continue;
+    }
+    Model::Impl::Body body;
+    body.link = entry.link;
+    body.frame = impl->model.getFrameId(entry.link);
+    body.geometry = link_geometry(entry);
+    body.placement = primitive_placement(entry);
+    impl->bodies.push_back(std::move(body));
+  }
+
+  // Which bodies the tool carries a payload with, read out of the description
+  // rather than listed: everything the rotator joint moves is on the tool side.
+  if (impl->model.existJointName(impl->names[6])) {
+    const pinocchio::JointIndex rotator = impl->model.getJointId(impl->names[6]);
+    for (Model::Impl::Body& body : impl->bodies) {
+      pinocchio::JointIndex joint = impl->model.frames[body.frame].parentJoint;
+      while (joint != 0) {
+        if (joint == rotator) {
+          body.tool_side = true;
+          break;
+        }
+        joint = impl->model.parents[joint];
+      }
+    }
+  }
+
+  for (std::size_t first = 0; first < impl->bodies.size(); ++first) {
+    for (std::size_t second = first + 1; second < impl->bodies.size(); ++second) {
+      if (!self_pair_is_allowed(impl->bodies[first].link, impl->bodies[second].link)) {
+        impl->self_pairs.emplace_back(first, second);
+      }
+    }
   }
 
   return Result<Model>::success(Model(std::move(impl)));
@@ -845,6 +1216,43 @@ Result<Jacobian6x8> Model::jacobian(const Q& q, Frame frame) const
   return Result<Jacobian6x8>::success(std::move(result));
 }
 
+// The whole scene and the crane itself, reduced to the one pair that matters:
+// the smallest distance found anywhere, and whatever it was against.
+Result<CollisionResult> Model::collision_query(const Q& q, const CollisionScene& scene) const
+{
+  if (!impl_) {
+    return Result<CollisionResult>::failure(not_ready());
+  }
+  std::vector<CollisionResult> results;
+  Status status = impl_->collide(q, scene, results);
+  if (!status.ok()) {
+    return Result<CollisionResult>::failure(std::move(status));
+  }
+  const auto worst = std::min_element(
+    results.begin(), results.end(),
+    [](const CollisionResult& left, const CollisionResult& right) {
+      return left.minimum_distance_m < right.minimum_distance_m;
+    });
+  return Result<CollisionResult>::success(*worst);
+}
+
+// One result per scene primitive, in scene order, then one for the crane against
+// itself. The container is dynamically sized, so this is not an RT API call
+// (contract §10) and the allocation guard in the contract test does not cover it.
+Result<std::vector<CollisionResult>> Model::collision_queries(
+  const Q& q, const CollisionScene& scene) const
+{
+  if (!impl_) {
+    return Result<std::vector<CollisionResult>>::failure(not_ready());
+  }
+  std::vector<CollisionResult> results;
+  Status status = impl_->collide(q, scene, results);
+  if (!status.ok()) {
+    return Result<std::vector<CollisionResult>>::failure(std::move(status));
+  }
+  return Result<std::vector<CollisionResult>>::success(std::move(results));
+}
+
 #define CRANE_MODEL_UNAVAILABLE(type, name) \
   Result<type> Model::name \
   { \
@@ -859,10 +1267,6 @@ CRANE_MODEL_UNAVAILABLE(
   reduced_actuated_dynamics(const Q&, const DQ&, const Input&, const Payload&) const)
 CRANE_MODEL_UNAVAILABLE(
   DQ, inverse_dynamics(const Q&, const DQ&, const DQ&, const Payload&) const)
-CRANE_MODEL_UNAVAILABLE(
-  CollisionResult, collision_query(const Q&, const CollisionScene&) const)
-CRANE_MODEL_UNAVAILABLE(
-  std::vector<CollisionResult>, collision_queries(const Q&, const CollisionScene&) const)
 CRANE_MODEL_UNAVAILABLE(
   SymbolicGraph, symbolic_graph(const SymbolicGraphSpec&, const Payload&) const)
 

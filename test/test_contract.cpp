@@ -1,12 +1,17 @@
 #include <gtest/gtest.h>
 
+#include <urdf_parser/urdf_parser.h>
+
 #include <limits>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <new>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -21,6 +26,11 @@
 
 #include "crane_model/model.hpp"
 #include "crane_model/testing/mock_model.hpp"
+
+// Private to the implementation; on this test's include path only, so the
+// generated collision geometry and the allowed-collision list can be checked
+// against the description and against config/allowed_collisions.srdf.
+#include "collision_model.hpp"
 
 static_assert(crane_model::Q::RowsAtCompileTime == 8);
 static_assert(crane_model::DQ::RowsAtCompileTime == 8);
@@ -1064,17 +1074,16 @@ TEST(CraneModelHydraulicSubset, SevenThousandFortyJawUsesTheDeployedFourBarFit)
 
 TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnavailable)
 {
-  // Both tools. Slice 4 arrives in pieces: forward kinematics and the Jacobian
-  // have a backend now, the dynamics, passive equilibrium, collision and
-  // symbolic graph do not, and each of them says so call by call rather than
-  // handing a consumer a stub.
+  // Both tools. Slice 4 arrives in pieces: forward kinematics, the Jacobian and
+  // now collision have a backend, the dynamics, passive equilibrium and symbolic
+  // graph do not, and each of them says so call by call rather than handing a
+  // consumer a stub.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
     const auto model = production_model(tool);
     ASSERT_TRUE(model.ok());
     const auto q = valid_q();
     const auto dq = crane_model::DQ::Ones();
     const auto payload = valid_payload();
-    const auto scene = crane_model::CollisionScene{};
     const auto unavailable = crane_model::ErrorCode::BackendUnavailable;
 
     EXPECT_EQ(model.value().passive_equilibrium(
@@ -1083,8 +1092,6 @@ TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnav
     EXPECT_EQ(model.value().reduced_actuated_dynamics(
       q, dq, crane_model::Input::Zero(), payload).status().code, unavailable);
     EXPECT_EQ(model.value().inverse_dynamics(q, dq, dq, payload).status().code, unavailable);
-    EXPECT_EQ(model.value().collision_query(q, scene).status().code, unavailable);
-    EXPECT_EQ(model.value().collision_queries(q, scene).status().code, unavailable);
     EXPECT_EQ(model.value().symbolic_graph({}, payload).status().code, unavailable);
   }
 }
@@ -1096,6 +1103,10 @@ TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
   // cannot be shown allocation-free is not an RT API call, and both of these
   // are on the control path. The Pinocchio model and its Data workspace are
   // built once, in create(), which is not real-time.
+  //
+  // These five are the whole of what this guard claims. Collision is not among
+  // them and is not meant to be; CollisionQueriesIsNotARealTimeCall shows it
+  // allocating, so the omission here is a statement and not a gap.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
     const auto model = production_model(tool);
     ASSERT_TRUE(model.ok());
@@ -1530,4 +1541,566 @@ TEST(CraneModelDescription, CylinderTransmissionFollowsTheDescriptionsGeometry)
         [&jaw](double angle) {return reference::jaw_stroke_from(jaw, angle);}, q8),
       kExactRatioTolerance) << "q8 = " << q8;
   }
+}
+
+// --- collision ---------------------------------------------------------------
+//
+// wiki/trajectory_planning.md §4.2: one model, one library, one URDF, giving
+// forward kinematics, dynamics, distances and collision. Pinocchio places the
+// links of the description and Coal answers over the geometry
+// src/collision_model.hpp carries -- fitted once, offline, to the `<collision>`
+// elements of these same two descriptions, because a ROS-free library with no
+// path in its config cannot resolve a `package://` mesh at runtime.
+
+namespace
+{
+
+// The compiled table's `source` field, taken apart again. It is a string so the
+// generated header stays readable; the comparison below is numeric, so a
+// formatting change in the derivation cannot make this test pass or fail.
+struct GeometrySource
+{
+  std::string kind;             // "mesh" or "box"
+  std::string name;             // the mesh URI, empty for a box
+  Eigen::Vector3d numbers{};    // mesh scale, or box side lengths
+};
+
+GeometrySource parse_source(const std::string& source)
+{
+  GeometrySource parsed;
+  const std::size_t colon = source.find(':');
+  parsed.kind = source.substr(0, colon);
+  const std::size_t at = source.rfind('@');
+  const std::size_t start = colon + 1;
+  const std::size_t stop = parsed.kind == "mesh" ? at : source.size();
+  parsed.name = parsed.kind == "mesh" ? source.substr(start, stop - start) : std::string{};
+  std::string numbers = source.substr(parsed.kind == "mesh" ? at + 1 : start);
+  std::replace(numbers.begin(), numbers.end(), ',', ' ');
+  std::istringstream stream(numbers);
+  stream >> parsed.numbers[0] >> parsed.numbers[1] >> parsed.numbers[2];
+  return parsed;
+}
+
+// The `disable_collisions` rows of the checked-in SRDF, unordered.
+std::set<std::pair<std::string, std::string>> checked_in_allowed_pairs()
+{
+  const std::string path = std::string(CRANE_MODEL_CONFIG_DIR) + "/allowed_collisions.srdf";
+  std::ifstream stream(path);
+  EXPECT_TRUE(stream.is_open()) << "cannot read " << path;
+  std::ostringstream buffer;
+  buffer << stream.rdbuf();
+  const std::string text = buffer.str();
+
+  std::set<std::pair<std::string, std::string>> pairs;
+  for (std::size_t at = text.find("<disable_collisions"); at != std::string::npos;
+    at = text.find("<disable_collisions", at + 1))
+  {
+    const auto attribute = [&text, at](const char * name) {
+        const std::size_t key = text.find(name, at);
+        const std::size_t open = text.find('"', key) + 1;
+        return text.substr(open, text.find('"', open) - open);
+      };
+    pairs.emplace(attribute("link1=\""), attribute("link2=\""));
+  }
+  return pairs;
+}
+
+crane_model::CollisionPrimitive box_primitive(
+  const std::string& id, const Eigen::Vector3d& position, const Eigen::Vector3d& sides)
+{
+  crane_model::CollisionPrimitive primitive;
+  primitive.id = id;
+  primitive.shape = crane_model::CollisionShape::Box;
+  primitive.pose_in_mounting_base = Eigen::Isometry3d::Identity();
+  primitive.pose_in_mounting_base.translation() = position;
+  primitive.dimensions_m = sides;
+  return primitive;
+}
+
+// Where the tool is, in K0, so a test can put an obstacle in its way without
+// writing down a number that the description could move underneath it.
+Eigen::Vector3d tool_position(const crane_model::Model& model, const crane_model::Q& q)
+{
+  const auto pose = model.forward_kinematics(
+    q, crane_model::Frame::MountingBase, crane_model::Frame::Tcp);
+  EXPECT_TRUE(pose.ok());
+  return pose.ok() ? pose.value().position_m : Eigen::Vector3d::Zero();
+}
+
+// The crane reaching out: boom and arm up, telescope extended, so the tool is
+// clear of the column and an obstacle beside it is an obstacle to the tool.
+crane_model::Q reaching_configuration()
+{
+  crane_model::Q q = crane_model::Q::Zero();
+  q[1] = 0.6;
+  q[2] = 1.2;
+  q[3] = 1.0;
+  return q;
+}
+
+// theta3_arm_joint runs to 4.6 rad in both descriptions, far past the working
+// range: at the stop the arm has folded back over the boom.
+crane_model::Q folded_configuration()
+{
+  crane_model::Q q = crane_model::Q::Zero();
+  q[2] = 4.6;
+  return q;
+}
+
+const crane_model::CollisionResult& scene_entry(
+  const std::vector<crane_model::CollisionResult>& results, const std::string& id)
+{
+  const auto found = std::find_if(
+    results.begin(), results.end(),
+    [&id](const crane_model::CollisionResult& result) {return result.other_id == id;});
+  EXPECT_NE(found, results.end()) << "no result for " << id;
+  return found == results.end() ? results.front() : *found;
+}
+
+bool names_a_self_pair(const crane_model::CollisionResult& result)
+{
+  return result.other_id.find('|') != std::string::npos;
+}
+
+}  // namespace
+
+TEST(CraneModelCollision, PrimitivesWereFittedToThisDescription)
+{
+  // The fit is compiled in, so the description is where it can rot. Every entry
+  // names the `<collision>` element it was fitted to; this asserts that element
+  // is still there, still that shape, still at that pose. A description that
+  // moves one fails here instead of being checked against stale geometry.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const ::urdf::ModelInterfaceSharedPtr tree = ::urdf::parseURDF(description_for(tool));
+    ASSERT_TRUE(tree);
+    std::size_t checked = 0;
+    for (const auto& entry : crane_model::collision_model::kLinkPrimitives) {
+      if (entry.tool != tool) {
+        continue;
+      }
+      ++checked;
+      const auto link = tree->getLink(entry.link);
+      ASSERT_TRUE(link) << entry.link << " is gone from the description";
+      ASSERT_TRUE(link->collision) << entry.link << " no longer carries collision geometry";
+      const auto& collision = *link->collision;
+
+      const GeometrySource source = parse_source(entry.source);
+      if (source.kind == "mesh") {
+        const auto mesh = std::dynamic_pointer_cast<::urdf::Mesh>(collision.geometry);
+        ASSERT_TRUE(mesh) << entry.link << " no longer carries a mesh";
+        EXPECT_EQ(mesh->filename, source.name) << entry.link;
+        EXPECT_NEAR(mesh->scale.x, source.numbers[0], 1.0e-9) << entry.link;
+        EXPECT_NEAR(mesh->scale.y, source.numbers[1], 1.0e-9) << entry.link;
+        EXPECT_NEAR(mesh->scale.z, source.numbers[2], 1.0e-9) << entry.link;
+      } else {
+        const auto box = std::dynamic_pointer_cast<::urdf::Box>(collision.geometry);
+        ASSERT_TRUE(box) << entry.link << " no longer carries a box";
+        EXPECT_NEAR(box->dim.x, source.numbers[0], 1.0e-9) << entry.link;
+        EXPECT_NEAR(box->dim.y, source.numbers[1], 1.0e-9) << entry.link;
+        EXPECT_NEAR(box->dim.z, source.numbers[2], 1.0e-9) << entry.link;
+      }
+
+      const Eigen::Vector3d translation(
+        collision.origin.position.x, collision.origin.position.y, collision.origin.position.z);
+      EXPECT_LT(
+        (translation - Eigen::Vector3d(
+          entry.source_pose[0], entry.source_pose[1], entry.source_pose[2])).norm(), 1.0e-6)
+        << entry.link << " moved its collision origin";
+      const Eigen::Matrix3d declared = Eigen::Quaterniond(
+        collision.origin.rotation.w, collision.origin.rotation.x,
+        collision.origin.rotation.y, collision.origin.rotation.z).toRotationMatrix();
+      // The table stores the element's roll-pitch-yaw; urdfdom has already
+      // turned it into a quaternion, so the two meet as rotations.
+      const Eigen::Matrix3d fitted =
+        (Eigen::AngleAxisd(entry.source_pose[5], Eigen::Vector3d::UnitZ()) *
+        Eigen::AngleAxisd(entry.source_pose[4], Eigen::Vector3d::UnitY()) *
+        Eigen::AngleAxisd(entry.source_pose[3], Eigen::Vector3d::UnitX())).toRotationMatrix();
+      EXPECT_LT(rotation_vector(declared.transpose() * fitted).norm(), 1.0e-6)
+        << entry.link << " turned its collision origin";
+
+      // A primitive with no size is not a primitive.
+      EXPECT_GT(entry.extents_m[0], 0.0) << entry.link;
+      EXPECT_GT(entry.extents_m[1], 0.0) << entry.link;
+      EXPECT_NEAR(
+        Eigen::Vector4d(
+          entry.orientation[0], entry.orientation[1],
+          entry.orientation[2], entry.orientation[3]).norm(), 1.0, 1.0e-9) << entry.link;
+    }
+    EXPECT_EQ(checked, 15U) << "the description has fifteen shaped links per tool";
+  }
+}
+
+TEST(CraneModelCollision, AllowedPairsAreTheCheckedInList)
+{
+  // The list the library filters with and the list a human reads are the same
+  // list. `config/allowed_collisions.srdf` is the checked-in artefact of
+  // `scripts/derive_collision_model.py`; the table in `src/collision_model.hpp`
+  // is what the queries use.
+  const auto checked_in = checked_in_allowed_pairs();
+  ASSERT_FALSE(checked_in.empty());
+
+  std::set<std::pair<std::string, std::string>> compiled;
+  for (const auto& pair : crane_model::collision_model::kAllowedSelfPairs) {
+    compiled.emplace(pair.first, pair.second);
+  }
+  EXPECT_EQ(compiled, checked_in);
+  EXPECT_EQ(compiled.size(), crane_model::collision_model::kAllowedSelfPairCount);
+}
+
+TEST(CraneModelCollision, SceneQueriesReturnRealResultsAgainstTheSuppliedScene)
+{
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok());
+    const auto q = reaching_configuration();
+    const Eigen::Vector3d tool_at = tool_position(model.value(), q);
+
+    // A block two metres below the tool, and one the tool is standing in.
+    crane_model::CollisionScene scene;
+    scene.primitives.push_back(
+      box_primitive("clear", tool_at - Eigen::Vector3d(0.0, 0.0, 2.0),
+      Eigen::Vector3d(0.4, 0.4, 0.4)));
+    scene.primitives.push_back(
+      box_primitive("hit", tool_at, Eigen::Vector3d(0.4, 0.4, 0.4)));
+
+    const auto results = model.value().collision_queries(q, scene);
+    ASSERT_TRUE(results.ok()) << results.status().message;
+    // One per scene primitive, in scene order, then the crane against itself.
+    ASSERT_EQ(results.value().size(), 3U);
+    EXPECT_EQ(results.value()[0].other_id, "clear");
+    EXPECT_EQ(results.value()[1].other_id, "hit");
+    EXPECT_TRUE(names_a_self_pair(results.value()[2]));
+
+    const auto& clear = results.value()[0];
+    EXPECT_FALSE(clear.collision);
+    EXPECT_GT(clear.minimum_distance_m, 0.0);
+    // Witness points are real points, in K0, and they realise the distance.
+    EXPECT_TRUE(clear.witness_on_robot_m.allFinite());
+    EXPECT_TRUE(clear.witness_on_other_m.allFinite());
+    EXPECT_NEAR(
+      (clear.witness_on_robot_m - clear.witness_on_other_m).norm(),
+      clear.minimum_distance_m, 1.0e-6);
+    // The one on the obstacle is on the obstacle: inside that 0.4 m box.
+    const Eigen::Vector3d local =
+      clear.witness_on_other_m - (tool_at - Eigen::Vector3d(0.0, 0.0, 2.0));
+    EXPECT_LT(local.cwiseAbs().maxCoeff(), 0.2 + 1.0e-6);
+
+    const auto& hit = results.value()[1];
+    EXPECT_TRUE(hit.collision);
+    EXPECT_LT(hit.minimum_distance_m, 0.0);
+
+    // The single-result call is the worst of them, whichever it was.
+    const auto worst = model.value().collision_query(q, scene);
+    ASSERT_TRUE(worst.ok());
+    double smallest = std::numeric_limits<double>::max();
+    for (const auto& result : results.value()) {
+      smallest = std::min(smallest, result.minimum_distance_m);
+    }
+    EXPECT_DOUBLE_EQ(worst.value().minimum_distance_m, smallest);
+    EXPECT_TRUE(worst.value().collision);
+    EXPECT_EQ(worst.value().other_id, "hit");
+
+    // An empty scene is not an error: the crane is still checked against itself.
+    const auto alone = model.value().collision_queries(q, crane_model::CollisionScene{});
+    ASSERT_TRUE(alone.ok());
+    ASSERT_EQ(alone.value().size(), 1U);
+    EXPECT_TRUE(names_a_self_pair(alone.value().front()));
+  }
+}
+
+TEST(CraneModelCollision, SelfCollisionIsCheckedAndTheAllowedPairsAreNot)
+{
+  const auto allowed = checked_in_allowed_pairs();
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok());
+    const auto empty = crane_model::CollisionScene{};
+
+    // Both directions, as the issue asks. First: a configuration the joint
+    // limits allow and the geometry does not. theta3_arm_joint reaches 4.6 rad,
+    // which folds the arm and both telescope stages back over the boom.
+    const auto folded = model.value().collision_query(folded_configuration(), empty);
+    ASSERT_TRUE(folded.ok()) << folded.status().message;
+    EXPECT_TRUE(folded.value().collision);
+    EXPECT_LT(folded.value().minimum_distance_m, 0.0);
+    EXPECT_TRUE(names_a_self_pair(folded.value())) << folded.value().other_id;
+    EXPECT_NEAR(
+      (folded.value().witness_on_robot_m - folded.value().witness_on_other_m).norm(),
+      -folded.value().minimum_distance_m, 1.0e-6);
+
+    // Second: the pairs on the list never appear, at that same configuration or
+    // at any of a spread of others. The adjacent links touch by construction --
+    // K2_boom and K3_arm share a joint -- so an unfiltered check would report
+    // them at every configuration and report nothing else usefully.
+    const std::array<crane_model::Q, 4> configurations{{
+      crane_model::Q::Zero(), reaching_configuration(), folded_configuration(), valid_q()}};
+    for (const auto& q : configurations) {
+      const auto results = model.value().collision_queries(q, empty);
+      ASSERT_TRUE(results.ok()) << results.status().message;
+      for (const auto& result : results.value()) {
+        const std::size_t bar = result.other_id.find('|');
+        ASSERT_NE(bar, std::string::npos);
+        const std::string first = result.other_id.substr(0, bar);
+        const std::string second = result.other_id.substr(bar + 1);
+        EXPECT_EQ(allowed.count({first, second}) + allowed.count({second, first}), 0U)
+          << first << " and " << second << " are on the allowed-collision list";
+      }
+    }
+
+    // And the neutral configuration is clear, so a collision reported anywhere
+    // else is the configuration's and not the geometry's.
+    const auto neutral = model.value().collision_query(crane_model::Q::Zero(), empty);
+    ASSERT_TRUE(neutral.ok());
+    EXPECT_FALSE(neutral.value().collision) << neutral.value().other_id;
+    EXPECT_GT(neutral.value().minimum_distance_m, 0.0);
+  }
+}
+
+TEST(CraneModelCollision, ToolGeometryIsToolDependent)
+{
+  // Same crane, same configuration, same scene; the two tools are different
+  // shapes and the model says so. The rail frame and the pincer frame are both
+  // called K8_tool_center_point and they are not the same primitive.
+  const auto rail = production_model(crane_model::Tool::Pzs100);
+  const auto jaws = production_model(crane_model::Tool::Epsilon7040);
+  ASSERT_TRUE(rail.ok());
+  ASSERT_TRUE(jaws.ok());
+
+  std::map<std::string, Eigen::Vector3d> extents;
+  for (const auto& entry : crane_model::collision_model::kLinkPrimitives) {
+    const std::string key = std::string(entry.tool == crane_model::Tool::Pzs100 ? "p:" : "e:") +
+      entry.link;
+    extents[key] =
+      Eigen::Vector3d(entry.extents_m[0], entry.extents_m[1], entry.extents_m[2]);
+  }
+  EXPECT_GT((extents.at("p:K8_tool_center_point") - extents.at("e:K8_tool_center_point")).norm(),
+    0.01);
+  EXPECT_EQ(extents.count("p:K10_left_rail"), 1U);
+  EXPECT_EQ(extents.count("e:K10_outer_jaw"), 1U);
+  EXPECT_EQ(extents.count("p:K10_outer_jaw"), 0U);
+  EXPECT_EQ(extents.count("e:K10_left_rail"), 0U);
+
+  const auto q = reaching_configuration();
+  crane_model::CollisionScene scene;
+  scene.primitives.push_back(
+    box_primitive(
+      "post", tool_position(rail.value(), q) - Eigen::Vector3d(0.0, 0.0, 1.0),
+      Eigen::Vector3d(0.3, 0.3, 2.0)));
+
+  const auto rail_result = rail.value().collision_queries(q, scene);
+  const auto jaw_result = jaws.value().collision_queries(q, scene);
+  ASSERT_TRUE(rail_result.ok());
+  ASSERT_TRUE(jaw_result.ok());
+  EXPECT_NE(
+    scene_entry(rail_result.value(), "post").minimum_distance_m,
+    scene_entry(jaw_result.value(), "post").minimum_distance_m);
+}
+
+TEST(CraneModelCollision, ACarriedPayloadIsIncludedButNotAgainstTheToolCarryingIt)
+{
+  // The frozen collision signature takes no `Payload`, so a carried payload is a
+  // scene primitive with the reserved id, placed at the pose the caller reads
+  // out of forward_kinematics. What the model owes it is the half a caller
+  // cannot supply: the links that hold it are not obstacles to it.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok());
+    const auto q = reaching_configuration();
+    const Eigen::Vector3d gripper = tool_position(model.value(), q);
+
+    crane_model::CollisionScene carried;
+    carried.primitives.push_back(
+      box_primitive("payload", gripper, Eigen::Vector3d(0.6, 0.6, 0.6)));
+    const auto held = model.value().collision_queries(q, carried);
+    ASSERT_TRUE(held.ok()) << held.status().message;
+    const auto& payload = scene_entry(held.value(), "payload");
+    EXPECT_FALSE(payload.collision)
+      << "the payload collided with " << payload.other_id;
+
+    // The same block under any other id is exactly what it looks like: the tool
+    // standing inside an obstacle.
+    crane_model::CollisionScene loose;
+    loose.primitives.push_back(
+      box_primitive("block", gripper, Eigen::Vector3d(0.6, 0.6, 0.6)));
+    const auto dropped = model.value().collision_queries(q, loose);
+    ASSERT_TRUE(dropped.ok());
+    EXPECT_TRUE(scene_entry(dropped.value(), "block").collision);
+
+    // Carried is not ignored: it is still checked against the rest of the crane,
+    // and it collides with the boom when the tool is folded back against it.
+    crane_model::CollisionScene big;
+    big.primitives.push_back(
+      box_primitive("payload", gripper, Eigen::Vector3d(6.0, 6.0, 6.0)));
+    const auto swept = model.value().collision_queries(q, big);
+    ASSERT_TRUE(swept.ok());
+    EXPECT_TRUE(scene_entry(swept.value(), "payload").collision);
+  }
+}
+
+TEST(CraneModelCollision, SceneIsConsumedInMountingBaseAndValidated)
+{
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  const auto q = reaching_configuration();
+
+  // Consumed in K0, not converted: a primitive at the tool's K0 position is hit,
+  // and slewing the crane away from it leaves the same primitive where it was.
+  crane_model::CollisionScene scene;
+  scene.primitives.push_back(
+    box_primitive("here", tool_position(model.value(), q), Eigen::Vector3d(0.3, 0.3, 0.3)));
+  const auto at_tool = model.value().collision_queries(q, scene);
+  ASSERT_TRUE(at_tool.ok());
+  EXPECT_TRUE(scene_entry(at_tool.value(), "here").collision);
+
+  auto slewed = q;
+  slewed[0] = 1.6;  // rad, most of a quarter turn away
+  const auto turned = model.value().collision_queries(slewed, scene);
+  ASSERT_TRUE(turned.ok());
+  const auto& missed = scene_entry(turned.value(), "here");
+  EXPECT_FALSE(missed.collision);
+  EXPECT_GT(missed.minimum_distance_m, 1.0);
+  // World is not a frame this library has, so nothing here could have converted.
+  EXPECT_EQ(
+    model.value().forward_kinematics(
+      q, crane_model::Frame::World, crane_model::Frame::MountingBase).status().code,
+    crane_model::ErrorCode::FrameUnavailable);
+
+  // A primitive that is not usable is refused, and the whole scene with it.
+  const Eigen::Vector3d somewhere(3.0, 0.0, 0.0);
+  const Eigen::Vector3d cube(0.5, 0.5, 0.5);
+  const auto refuses = [&model, &q](const crane_model::CollisionPrimitive& primitive) {
+      crane_model::CollisionScene bad;
+      bad.primitives.push_back(primitive);
+      EXPECT_EQ(
+        model.value().collision_query(q, bad).status().code,
+        crane_model::ErrorCode::InvalidScene) << primitive.id;
+      EXPECT_EQ(
+        model.value().collision_queries(q, bad).status().code,
+        crane_model::ErrorCode::InvalidScene) << primitive.id;
+    };
+
+  refuses(box_primitive("", somewhere, cube));
+  refuses(box_primitive("flat", somewhere, Eigen::Vector3d(0.5, 0.0, 0.5)));
+  refuses(box_primitive("inside out", somewhere, Eigen::Vector3d(0.5, -0.5, 0.5)));
+  refuses(
+    box_primitive(
+      "not finite", somewhere,
+      Eigen::Vector3d(0.5, std::numeric_limits<double>::quiet_NaN(), 0.5)));
+
+  auto skewed = box_primitive("skewed", somewhere, cube);
+  skewed.pose_in_mounting_base.linear() *= 2.0;
+  refuses(skewed);
+
+  auto unknown = box_primitive("unknown", somewhere, cube);
+  unknown.shape = static_cast<crane_model::CollisionShape>(200);
+  refuses(unknown);
+
+  // `dimensions_m` is the primitive's extent on each axis of its own frame, so a
+  // cylinder carries its diameter twice and a sphere three times. A caller who
+  // meant a radius in the first entry gets told, not silently reinterpreted.
+  auto cylinder = box_primitive("cylinder", somewhere, Eigen::Vector3d(0.4, 0.9, 1.0));
+  cylinder.shape = crane_model::CollisionShape::Cylinder;
+  refuses(cylinder);
+  auto sphere = box_primitive("sphere", somewhere, Eigen::Vector3d(0.4, 0.4, 0.9));
+  sphere.shape = crane_model::CollisionShape::Sphere;
+  refuses(sphere);
+
+  crane_model::CollisionScene twice;
+  twice.primitives.push_back(box_primitive("same", somewhere, cube));
+  twice.primitives.push_back(box_primitive("same", -somewhere, cube));
+  EXPECT_EQ(
+    model.value().collision_query(q, twice).status().code,
+    crane_model::ErrorCode::InvalidScene);
+
+  // The well formed versions of the two round shapes are accepted.
+  crane_model::CollisionScene round;
+  auto good_cylinder = box_primitive("cylinder", somewhere, Eigen::Vector3d(0.4, 0.4, 1.0));
+  good_cylinder.shape = crane_model::CollisionShape::Cylinder;
+  auto good_sphere = box_primitive("sphere", -somewhere, Eigen::Vector3d(0.4, 0.4, 0.4));
+  good_sphere.shape = crane_model::CollisionShape::Sphere;
+  round.primitives = {good_cylinder, good_sphere};
+  const auto accepted = model.value().collision_queries(q, round);
+  ASSERT_TRUE(accepted.ok()) << accepted.status().message;
+  EXPECT_EQ(accepted.value().size(), 3U);
+
+  auto non_finite_q = q;
+  non_finite_q[4] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(
+    model.value().collision_query(non_finite_q, round).status().code,
+    crane_model::ErrorCode::NonFiniteInput);
+  EXPECT_EQ(
+    model.value().collision_queries(non_finite_q, round).status().code,
+    crane_model::ErrorCode::NonFiniteInput);
+}
+
+TEST(CraneModelCollision, ADescriptionWithoutTheShapedLinksIsRefusedNotAnswered)
+{
+  // The fit is for this machine. A description that parses and carries the eight
+  // joints is a usable model for everything else -- `crane_control` builds one
+  // from a joints-only fixture -- but it is not a crane to check for collision,
+  // and the model says which link it is missing rather than answering for a
+  // crane with parts missing.
+  crane_model::ModelConfig config;
+  config.robot_description_xml =
+    "<robot name=\"fixture\">"
+    "<link name=\"K0_mounting_base\"/><link name=\"a\"/><link name=\"b\"/><link name=\"c\"/>"
+    "<link name=\"d\"/><link name=\"e\"/><link name=\"f\"/><link name=\"g\"/><link name=\"h\"/>"
+    "<joint name=\"theta1_slewing_joint\" type=\"revolute\">"
+    "<parent link=\"K0_mounting_base\"/><child link=\"a\"/>"
+    "<axis xyz=\"0 0 1\"/><limit lower=\"-3\" upper=\"3\" effort=\"1\" velocity=\"1\"/></joint>"
+    "<joint name=\"theta2_boom_joint\" type=\"revolute\"><parent link=\"a\"/><child link=\"b\"/>"
+    "<axis xyz=\"0 0 1\"/><limit lower=\"-3\" upper=\"3\" effort=\"1\" velocity=\"1\"/></joint>"
+    "<joint name=\"theta3_arm_joint\" type=\"revolute\"><parent link=\"b\"/><child link=\"c\"/>"
+    "<axis xyz=\"0 0 1\"/><limit lower=\"-3\" upper=\"3\" effort=\"1\" velocity=\"1\"/></joint>"
+    "<joint name=\"q4_big_telescope\" type=\"prismatic\"><parent link=\"c\"/><child link=\"d\"/>"
+    "<axis xyz=\"0 0 1\"/><limit lower=\"0\" upper=\"2\" effort=\"1\" velocity=\"1\"/></joint>"
+    "<joint name=\"theta6_tip_joint\" type=\"revolute\"><parent link=\"d\"/><child link=\"e\"/>"
+    "<axis xyz=\"0 0 1\"/><limit lower=\"-3\" upper=\"3\" effort=\"1\" velocity=\"1\"/></joint>"
+    "<joint name=\"theta7_tilt_joint\" type=\"revolute\"><parent link=\"e\"/><child link=\"f\"/>"
+    "<axis xyz=\"0 0 1\"/><limit lower=\"-3\" upper=\"3\" effort=\"1\" velocity=\"1\"/></joint>"
+    "<joint name=\"theta8_rotator_joint\" type=\"continuous\">"
+    "<parent link=\"f\"/><child link=\"g\"/><axis xyz=\"0 0 1\"/></joint>"
+    "<joint name=\"q9_left_rail_joint\" type=\"prismatic\">"
+    "<parent link=\"g\"/><child link=\"h\"/>"
+    "<axis xyz=\"0 0 1\"/><limit lower=\"0\" upper=\"1\" effort=\"1\" velocity=\"1\"/></joint>"
+    "</robot>";
+  const auto model = crane_model::Model::create(config);
+  ASSERT_TRUE(model.ok()) << model.status().message;
+  EXPECT_TRUE(model.value().forward_kinematics(
+    crane_model::Q::Zero(), crane_model::Frame::MountingBase,
+    crane_model::Frame::MountingBase).ok());
+
+  const auto refused =
+    model.value().collision_query(crane_model::Q::Zero(), crane_model::CollisionScene{});
+  EXPECT_EQ(refused.status().code, crane_model::ErrorCode::CollisionBackendFailure);
+  const bool names_a_link = std::any_of(
+    crane_model::collision_model::kLinkPrimitives.begin(),
+    crane_model::collision_model::kLinkPrimitives.end(),
+    [&refused](const crane_model::collision_model::LinkPrimitive& entry) {
+      return entry.tool == crane_model::Tool::Pzs100 &&
+      refused.status().message.find(entry.link) != std::string::npos;
+    });
+  EXPECT_TRUE(names_a_link) << refused.status().message;
+}
+
+TEST(CraneModelCollision, CollisionQueriesIsNotARealTimeCall)
+{
+  // Contract §10: a call returning a dynamically sized container is not an RT
+  // API call. The guard in RealTimeCallsAllocateNothingAfterConstruction covers
+  // the five that are; this is the demonstration that collision is not one of
+  // them, so the guard's silence about it is a fact and not an oversight.
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  const auto q = reaching_configuration();
+  crane_model::CollisionScene scene;
+  scene.primitives.push_back(
+    box_primitive("post", Eigen::Vector3d(4.0, 0.0, 0.0), Eigen::Vector3d(0.3, 0.3, 2.0)));
+  ASSERT_TRUE(model.value().collision_queries(q, scene).ok());
+
+  g_allocation_count.store(0, std::memory_order_relaxed);
+  g_allocation_guard.store(true, std::memory_order_relaxed);
+  const bool ok = model.value().collision_queries(q, scene).ok();
+  g_allocation_guard.store(false, std::memory_order_relaxed);
+  EXPECT_TRUE(ok);
+  EXPECT_GT(g_allocation_count.load(std::memory_order_relaxed), 0U);
 }
