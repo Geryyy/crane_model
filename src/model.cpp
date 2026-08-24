@@ -12,6 +12,7 @@
 #include <cmath>
 #include <exception>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -26,6 +27,7 @@
 #include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/rnea.hpp>
+#include <pinocchio/algorithm/rnea-derivatives.hpp>
 
 #include "collision_model.hpp"
 
@@ -571,6 +573,49 @@ Status factorise_passive_mass(const PassiveMass& M_uu, Eigen::LLT<PassiveMass>& 
   return Status{};
 }
 
+// --- the passive equilibrium of wiki/robot_model.md §2.3 ---------------------
+//
+// h_u(q_a, q_eq, 0) = 0. At dq = 0 every velocity-dependent term of §1 drops out
+// of h -- Coriolis, centrifugal and D dq alike -- so the condition says that the
+// passive rows of the *gravity* torque vanish, which is to say that q_eq is a
+// critical point of the potential energy over the two passive coordinates.
+// Newton converges quadratically on it, because the exact derivative is at hand:
+// dh_u/dq_u is the passive block of Pinocchio's gravity Jacobian, i.e. the
+// Hessian of that same potential, and it is symmetric for that reason.
+//
+// A two-hinge pendulum has four critical points on the torus and two of them are
+// the tool standing *up*. They satisfy the equation exactly as well as the
+// hanging one does, so the solve may not return one: robot_model §2.3 asks for
+// where the tool settles, mpc §2 uses it as the point the sway cost damps
+// toward, and trajectory_planning §6 makes it the endpoint the tool must arrive
+// at without swinging. The condition that distinguishes them is the sign of the
+// stiffness, so the returned pose is required to have a positive definite one --
+// checked at every iterate, so a step that leaves the hanging well is refused
+// where it happens rather than at the end.
+
+// The residual h_u is driven to, in N m. The passive rows carry of order 1e3 N m
+// of individual gravity terms that cancel at the equilibrium, so double
+// precision leaves a noise floor near 1e-13 N m; against a restoring stiffness of
+// 2e3 N m/rad this tolerance is an angle error below 1e-11 rad, and it is
+// reported in the README as the model's own residual bound. It is two decades
+// above the achieved residual on both descriptions and five below the 1e-6 N m
+// the invariant of contract §7 is asserted at.
+constexpr double kEquilibriumResidual = 1.0e-8;
+
+// Newton from inside the well reaches that in single digits of iterations. The
+// budget is a runaway guard, not a working range: a solve that has not settled
+// within it has not found the well and says so.
+constexpr int kEquilibriumIterations = 32;
+
+// Samples per passive axis in the seed search, endpoints included. Five over the
+// pi of tip range puts a sample within an eighth of a turn of anywhere in it,
+// which is well inside the quarter turn that separates the hanging well from the
+// saddles either side of it. Twenty-five samples is also what makes this call
+// cost tens of `rnea` evaluations rather than one: it allocates nothing, so
+// contract §10 does not exclude it, but the README says plainly that its cost is
+// a per-plan one and not a per-cycle one.
+constexpr int kEquilibriumSamples = 5;
+
 // One canonical coordinate's place in the parsed model. `unbounded` is the
 // `continuous` rotator of ROS 2 Interfaces §3.1: Pinocchio stores such a joint
 // as (cos, sin), so it occupies two configuration entries and one velocity
@@ -860,7 +905,8 @@ struct Model::Impl
     neutral(configuration),
     joint_jacobian(pinocchio::Data::Matrix6x::Zero(6, model.nv)),
     velocity(Eigen::VectorXd::Zero(model.nv)),
-    acceleration(Eigen::VectorXd::Zero(model.nv))
+    acceleration(Eigen::VectorXd::Zero(model.nv)),
+    gravity_jacobian(Eigen::MatrixXd::Zero(model.nv, model.nv))
   {
   }
 
@@ -877,6 +923,9 @@ struct Model::Impl
   pinocchio::Data::Matrix6x joint_jacobian;
   Eigen::VectorXd velocity;
   Eigen::VectorXd acceleration;
+  // dg/dq of the parsed model, the workspace the equilibrium solve reads its
+  // passive stiffness block out of. Sized once here, like every other buffer.
+  Eigen::MatrixXd gravity_jacobian;
   std::array<JointSlot, kGeneralizedDof> joints{};
   std::vector<CoupledJoint> coupled;
   std::array<pinocchio::FrameIndex, kFrameCount> frames{};
@@ -902,6 +951,22 @@ struct Model::Impl
   // `nonLinearEffects` applies `model.damping`, which is what makes the split of
   // §1 -- h from the description, D a fitted parameter -- hold by construction.
   Q damping{Q::Zero()};
+
+  // The range the description gives the two passive joints, which is where the
+  // equilibrium solve of §2.3 looks for the well. The description is the only
+  // statement in the workspace of where the double hinge is allowed to be, and
+  // the hanging equilibrium is the critical point inside it -- the standing ones
+  // are half a turn away, outside both ranges. A joint the description leaves
+  // unbounded falls back to a full turn, which is the whole torus and still
+  // contains exactly one hanging well.
+  QU passive_lower{QU::Constant(-M_PI)};
+  QU passive_upper{QU::Constant(M_PI)};
+
+  [[nodiscard]] double sample_passive(Eigen::Index row, int index) const
+  {
+    const double span = passive_upper[row] - passive_lower[row];
+    return passive_lower[row] + span * index / (kEquilibriumSamples - 1);
+  }
 
   // The payload body of robot_model §5. Pinocchio has no per-call payload, so it
   // is written into the inertia of the joint that carries K8_rotator_lower_part
@@ -1133,6 +1198,172 @@ private:
     return Status{};
   }
 
+  // The passive rows of the gravity torque at one (q_a, q_u) with dq = 0, and the
+  // stiffness dg_u/dq_u that goes with them, from a single pass: Pinocchio's
+  // gravity-derivative algorithm reports dg/dq into the workspace and g itself
+  // into `data.g`, so a seed search costs one pass per sample and not two. The
+  // payload is expected to be attached already -- the whole solve runs under one
+  // guard -- and the configuration it writes is left in place for
+  // `passive_torque` to reuse.
+  Status passive_gravity(Q& q, const QU& passive, QU& gravity, PassiveMass& stiffness)
+  {
+    for (std::size_t row = 0; row < kPassiveDof; ++row) {
+      q[kPassiveRows[row]] = passive[static_cast<Eigen::Index>(row)];
+    }
+    write_configuration(q);
+    // The passive coordinates are neither a `<mimic>` nor mimicked, so neither
+    // the two rows nor the two columns below need the projection P: it is the
+    // identity on both.
+    gravity_jacobian.setZero();
+    pinocchio::computeGeneralizedGravityDerivatives(
+      model, data, configuration, gravity_jacobian);
+    DQ generalized;
+    project(data.g, generalized);
+    for (std::size_t row = 0; row < kPassiveDof; ++row) {
+      const Eigen::Index index = static_cast<Eigen::Index>(row);
+      gravity[index] = generalized[kPassiveRows[row]];
+      for (std::size_t column = 0; column < kPassiveDof; ++column) {
+        stiffness(index, static_cast<Eigen::Index>(column)) = gravity_jacobian(
+          joints[static_cast<std::size_t>(kPassiveRows[row])].velocity_index,
+          joints[static_cast<std::size_t>(kPassiveRows[column])].velocity_index);
+      }
+    }
+    if (!finite(gravity) || !finite(stiffness)) {
+      return failure(
+        ErrorCode::SingularConfiguration,
+        "the passive gravity torque is not finite at this configuration");
+    }
+    // The Hessian of a potential is symmetric; the two off-diagonal entries come
+    // out of different sweeps of the same algorithm, so they are averaged rather
+    // than one of them being picked.
+    const double coupling = 0.5 * (stiffness(0, 1) + stiffness(1, 0));
+    stiffness(0, 1) = coupling;
+    stiffness(1, 0) = coupling;
+    return Status{};
+  }
+
+  // The same two rows taken from `rnea` at rest instead, on the configuration
+  // `passive_gravity` has just written. This is the exact quantity
+  // `inverse_dynamics(q, 0, 0, payload)` returns -- one algorithm, one call, the
+  // damping term vanishing with dq -- so the residual the Newton iteration drives
+  // to zero is the one contract §7 states the invariant on, and not a second
+  // computation of it that could agree to fewer digits.
+  Status passive_torque(QU& residual)
+  {
+    velocity.setZero();
+    acceleration.setZero();
+    pinocchio::rnea(model, data, configuration, velocity, acceleration);
+    DQ tau;
+    project(data.tau, tau);
+    for (std::size_t row = 0; row < kPassiveDof; ++row) {
+      residual[static_cast<Eigen::Index>(row)] = tau[kPassiveRows[row]];
+    }
+    if (!finite(residual)) {
+      return failure(
+        ErrorCode::SingularConfiguration,
+        "the passive rows of the inverse dynamics are not finite at this configuration");
+    }
+    return Status{};
+  }
+
+  // What the solve says when it started in a hanging well inside the passive
+  // range and the iteration did not settle in one. Every observed instance is the
+  // same physical case: the crane folded far enough that the free hanging pose
+  // needs more tip travel than the description gives that joint, so the tool
+  // would come to rest against a stop instead of hanging. That is not a pose
+  // robot_model §2.3 defines, and a plausible-looking q_u would be worse than
+  // none -- mpc §2 would damp the sway toward it and trajectory_planning §6 would
+  // make it an endpoint.
+  static Status unreachable_equilibrium()
+  {
+    return failure(
+      ErrorCode::SingularConfiguration,
+      "the passive joints reach no hanging pose from inside the range the description gives "
+      "them at this q_a");
+  }
+
+  // wiki/robot_model.md §2.3. The payload is attached once for the whole solve
+  // rather than once per iterate, so the iteration is the one equation the whole
+  // time.
+  //
+  // Two stages, and the first is the one that picks the branch. Newton alone is
+  // local and h_u is flat a quarter turn from the well, so a fixed start inside
+  // the passive range is not enough -- at the crane's own zero the tool hangs at
+  // the far end of the tip range and a start in the middle of it sits on the
+  // saddle between the two wells. So the range the description gives the two
+  // passive joints is sampled first, and the sample the Newton starts from is the
+  // one with the smallest residual *among those with a positive definite
+  // stiffness*: that condition is what separates hanging from standing, and it is
+  // applied before the iteration rather than after it.
+  Status solve_equilibrium(const QA& q_a, const Payload& payload, QU& q_equilibrium)
+  {
+    if (!finite(q_a)) {
+      return failure(ErrorCode::NonFiniteInput, "q_a is not finite");
+    }
+    Status status = attach_payload(payload);
+    if (!status.ok()) {
+      return status;
+    }
+    const PayloadGuard guard(*this);
+
+    Q q = Q::Zero();
+    for (std::size_t row = 0; row < kActuatedDof; ++row) {
+      q[kActuatedRows[row]] = q_a[static_cast<Eigen::Index>(row)];
+    }
+    QU gravity;
+    QU residual;
+    PassiveMass stiffness;
+
+    QU passive = QU::Zero();
+    double best = std::numeric_limits<double>::infinity();
+    for (int tip = 0; tip < kEquilibriumSamples; ++tip) {
+      for (int tilt = 0; tilt < kEquilibriumSamples; ++tilt) {
+        QU sample;
+        sample[0] = sample_passive(0, tip);
+        sample[1] = sample_passive(1, tilt);
+        if (!passive_gravity(q, sample, gravity, stiffness).ok()) {
+          continue;
+        }
+        if (Eigen::LLT<PassiveMass>(stiffness).info() != Eigen::Success) {
+          continue;
+        }
+        if (gravity.norm() < best) {
+          best = gravity.norm();
+          passive = sample;
+        }
+      }
+    }
+    if (!(best < std::numeric_limits<double>::infinity())) {
+      return failure(
+        ErrorCode::SingularConfiguration,
+        "no pose in the passive joint range has a restoring stiffness at this q_a, so there is "
+        "nowhere for the tool to hang");
+    }
+
+    for (int iteration = 0; iteration < kEquilibriumIterations; ++iteration) {
+      status = passive_gravity(q, passive, gravity, stiffness);
+      if (status.ok()) {
+        status = passive_torque(residual);
+      }
+      if (!status.ok()) {
+        return status;
+      }
+      Eigen::LLT<PassiveMass> factorisation(stiffness);
+      if (factorisation.info() != Eigen::Success) {
+        return unreachable_equilibrium();
+      }
+      if (residual.norm() <= kEquilibriumResidual) {
+        q_equilibrium = passive;
+        return Status{};
+      }
+      passive -= factorisation.solve(residual);
+      if (!finite(passive)) {
+        return unreachable_equilibrium();
+      }
+    }
+    return unreachable_equilibrium();
+  }
+
   // The fit is for this machine. A description that does not carry every link it
   // was fitted to would answer with a crane that is missing parts, which is
   // worse than not answering; contract §5 says so rather than substituting.
@@ -1362,6 +1593,24 @@ Result<Model> Model::create(const ModelConfig& config)
   // must not enter the model; no identified value is recorded anywhere in the
   // vault, so the entry is zero rather than a guess. README says so.
   impl->damping[3] = 0.0;
+
+  // The passive range of robot_model §2.3, read out of the description rather
+  // than written down: both machine descriptions bound the tip at +-pi/2 and the
+  // tilt between pi/4 and 3pi/4. That range is where the equilibrium solve looks
+  // for the hanging well, so which of the pendulum's critical points this library
+  // returns is the description's statement and not one made here.
+  for (std::size_t row = 0; row < kPassiveDof; ++row) {
+    const JointSlot& slot = impl->joints[static_cast<std::size_t>(kPassiveRows[row])];
+    if (slot.unbounded) {
+      continue;
+    }
+    const double lower = impl->model.lowerPositionLimit[slot.config_index];
+    const double upper = impl->model.upperPositionLimit[slot.config_index];
+    if (std::isfinite(lower) && std::isfinite(upper) && lower < upper) {
+      impl->passive_lower[static_cast<Eigen::Index>(row)] = lower;
+      impl->passive_upper[static_cast<Eigen::Index>(row)] = upper;
+    }
+  }
 
   for (std::size_t index = 0; index < kFrameCount; ++index) {
     const bool present = impl->model.existFrame(kFrameLinks[index].link);
@@ -1733,6 +1982,23 @@ Result<ReducedDynamics> Model::reduced_actuated_dynamics(
   return Result<ReducedDynamics>::success(std::move(result));
 }
 
+// wiki/robot_model.md §2.3: where the tool hangs once the actuated joints are
+// held and it has stopped swinging. The signature carries no q_u and no initial
+// guess, so the branch is chosen inside -- see `passive_seed` and the stiffness
+// test in `solve_equilibrium`.
+Result<QU> Model::passive_equilibrium(const QA& q_a, const Payload& payload) const
+{
+  if (!impl_) {
+    return Result<QU>::failure(not_ready());
+  }
+  QU q_equilibrium;
+  Status status = impl_->solve_equilibrium(q_a, payload, q_equilibrium);
+  if (!status.ok()) {
+    return Result<QU>::failure(std::move(status));
+  }
+  return Result<QU>::success(std::move(q_equilibrium));
+}
+
 #define CRANE_MODEL_UNAVAILABLE(type, name) \
   Result<type> Model::name \
   { \
@@ -1740,7 +2006,6 @@ Result<ReducedDynamics> Model::reduced_actuated_dynamics(
       failure(ErrorCode::BackendUnavailable, "production model backend is unavailable")); \
   }
 
-CRANE_MODEL_UNAVAILABLE(QU, passive_equilibrium(const QA&, const Payload&) const)
 CRANE_MODEL_UNAVAILABLE(
   SymbolicGraph, symbolic_graph(const SymbolicGraphSpec&, const Payload&) const)
 

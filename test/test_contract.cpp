@@ -1078,32 +1078,36 @@ TEST(CraneModelHydraulicSubset, SevenThousandFortyJawUsesTheDeployedFourBarFit)
 TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnavailable)
 {
   // Both tools. Slice 4 arrives in pieces: forward kinematics, the Jacobian,
-  // collision and now the rigid-body dynamics have a backend, the passive
-  // equilibrium and the symbolic graph do not, and each of the two says so call
-  // by call rather than handing a consumer a stub.
+  // collision, the rigid-body dynamics and now the passive equilibrium have a
+  // backend, the symbolic graph does not, and it says so rather than handing a
+  // consumer a stub.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
     const auto model = production_model(tool);
     ASSERT_TRUE(model.ok());
     const auto payload = valid_payload();
     const auto unavailable = crane_model::ErrorCode::BackendUnavailable;
 
-    EXPECT_EQ(model.value().passive_equilibrium(
-      crane_model::QA::Zero(), payload).status().code, unavailable);
     EXPECT_EQ(model.value().symbolic_graph({}, payload).status().code, unavailable);
+
+    // And the equilibrium is no longer among them: whatever it answers at a given
+    // q_a, it does not answer "no backend".
+    EXPECT_NE(model.value().passive_equilibrium(
+      crane_model::QA::Zero(), payload).status().code, unavailable);
   }
 }
 
 TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
 {
   // Both tools, because the 7040's jaw four-bar is on the same RT path, and now
-  // also forward kinematics, the Jacobian and the three rigid-body dynamics
-  // calls: contract §10 says a call that cannot be shown allocation-free is not
-  // an RT API call, and all of these are on the control path. The Pinocchio
-  // model, its Data workspace and the two velocity buffers are built once, in
-  // create(), which is not real-time; the payload is written into the model's
-  // own inertia for the length of a call, which is fixed-size arithmetic.
+  // also forward kinematics, the Jacobian, the three rigid-body dynamics calls
+  // and the passive equilibrium: contract §10 says a call that cannot be shown
+  // allocation-free is not an RT API call, and all of these are on the control
+  // path. The Pinocchio model, its Data workspace, the two velocity buffers and
+  // the gravity-Jacobian workspace are built once, in create(), which is not
+  // real-time; the payload is written into the model's own inertia for the length
+  // of a call, which is fixed-size arithmetic.
   //
-  // These eight are the whole of what this guard claims. Collision is not among
+  // These nine are the whole of what this guard claims. Collision is not among
   // them and is not meant to be; CollisionQueriesIsNotARealTimeCall shows it
   // allocating, so the omission here is a statement and not a gap.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
@@ -1119,6 +1123,12 @@ TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
     const auto payload = valid_payload();
     const auto base = crane_model::Frame::MountingBase;
     const auto tcp = crane_model::Frame::Tcp;
+    // The equilibrium solve needs a q_a the tool can actually hang at, because a
+    // failing call would allocate its own diagnostic and prove nothing. This is
+    // the actuated half of the `loaded_configuration` the dynamics tests below
+    // use, written out because those helpers come later in the file.
+    crane_model::QA q_a;
+    q_a << 0.4, 0.35, 0.9, 0.8, 0.6, 0.3;
     // Warm every code path before observing allocations.
     ASSERT_TRUE(model.value().cylinder_jacobian(q).ok());
     ASSERT_TRUE(model.value().transmission(q, dq_a, pressure).ok());
@@ -1128,6 +1138,7 @@ TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
     ASSERT_TRUE(model.value().full_dynamics(q, dq, payload).ok());
     ASSERT_TRUE(model.value().inverse_dynamics(q, dq, dq, payload).ok());
     ASSERT_TRUE(model.value().reduced_actuated_dynamics(q, dq, ddq_a, payload).ok());
+    ASSERT_TRUE(model.value().passive_equilibrium(q_a, payload).ok());
 
     g_allocation_count.store(0, std::memory_order_relaxed);
     g_allocation_guard.store(true, std::memory_order_relaxed);
@@ -1141,6 +1152,15 @@ TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
       all_ok = all_ok && model.value().full_dynamics(q, dq, payload).ok();
       all_ok = all_ok && model.value().inverse_dynamics(q, dq, dq, payload).ok();
       all_ok = all_ok && model.value().reduced_actuated_dynamics(q, dq, ddq_a, payload).ok();
+    }
+    // The equilibrium is a bounded iteration over the same fixed-size workspaces
+    // and it allocates nothing, but one call already walks the whole seed grid
+    // and the whole Newton iteration -- tens of `rnea` evaluations, not one. What
+    // is being counted is allocations per call, so it is exercised a handful of
+    // times rather than a thousand. The cost is in the README; contract §10's
+    // test is allocation, and it passes it.
+    for (int index = 0; index < 5; ++index) {
+      all_ok = all_ok && model.value().passive_equilibrium(q_a, payload).ok();
     }
     g_allocation_guard.store(false, std::memory_order_relaxed);
     EXPECT_TRUE(all_ok);
@@ -2142,6 +2162,245 @@ TEST(CraneModelDynamics, AnOffsetGraspMovesThePassiveEquilibrium)
   // differently: the double hinge is not a single pendulum.
   EXPECT_NEAR((large - nominal).norm() / shift, 2.0, 0.2);
   EXPECT_GT((across - small).norm(), 0.5 * shift);
+}
+
+// --- the passive equilibrium -------------------------------------------------
+//
+// wiki/robot_model.md §2.3: q_eq(q_a, payload) solves h_u(q_a, q_eq, 0) = 0, and
+// for a two-joint pendulum that is the tool hanging along gravity. The two tests
+// above already located it from the potential energy and showed the invariant
+// holding there; these ask the same of the API call that now returns it.
+
+namespace
+{
+
+// A configuration built from an actuated vector and the passive pose the model
+// returned for it -- the round trip the invariant of contract §7 is stated on.
+crane_model::Q settled_configuration(const crane_model::QA& q_a, const crane_model::QU& q_u)
+{
+  crane_model::Q q = crane_model::Q::Zero();
+  for (Eigen::Index index = 0; index < 6; ++index) {
+    q[kActuatedRows[static_cast<std::size_t>(index)]] = q_a[index];
+  }
+  q[kPassiveRows[0]] = q_u[0];
+  q[kPassiveRows[1]] = q_u[1];
+  return q;
+}
+
+}  // namespace
+
+TEST(CraneModelEquilibrium, ThePassiveRowsVanishAtTheReturnedPose)
+{
+  // The acceptance test of the whole call, and it is against the *dynamics* and
+  // not against the solver: the returned q_u goes back in through
+  // inverse_dynamics with zero passive velocity and acceleration, and the two
+  // passive rows have to be zero. That is the invariant contract §7 states and
+  // the one issue 031 established -- the same assertion
+  // PassiveRowsVanishAtTheEquilibrium makes about a pose found by minimising the
+  // potential energy, now made about the pose this API returns instead.
+  //
+  // dq is zero in all eight rows and not only the passive two. robot_model §3.1
+  // is explicit that the centrifugal coupling from slewing reaches the passive
+  // rows, so a nonzero actuated rate would put a real Coriolis term there and the
+  // invariant would not hold -- the equilibrium condition is stated at rest.
+  //
+  // 1e-6 N m against a restoring torque of order 1e2 N m one degree away. The
+  // solve's own bound is 1e-8 N m, stated in the README; the margin here is for
+  // the difference between a residual the model drove to zero and the same
+  // quantity recomputed through the public call.
+  constexpr double kPassiveResidual = 1.0e-6;
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    const crane_model::QA q_a = actuated_rows(loaded_configuration());
+    // With a payload and without one: contract §4's declared zero-mass gripper is
+    // a payload, and the two give different equilibria.
+    for (const auto& payload : {empty_gripper(), block_payload()}) {
+      const auto settled = model.value().passive_equilibrium(q_a, payload);
+      ASSERT_TRUE(settled.ok()) << settled.status().message;
+      const crane_model::Q q = settled_configuration(q_a, settled.value());
+
+      const auto tau = model.value().inverse_dynamics(
+        q, crane_model::DQ::Zero(), crane_model::DQ::Zero(), payload);
+      ASSERT_TRUE(tau.ok()) << tau.status().message;
+      EXPECT_LT(passive_rows(tau.value()).norm(), kPassiveResidual)
+        << "tau_u = " << passive_rows(tau.value()).transpose();
+
+      // Not vacuously zero, exactly as at the energy minimum: a degree off the
+      // returned pose the same two rows carry the restoring torque, and the
+      // actuated rows are busy holding the crane up.
+      crane_model::Q tilted = q;
+      tilted[kPassiveRows[1]] += M_PI / 180.0;
+      const auto off = model.value().inverse_dynamics(
+        tilted, crane_model::DQ::Zero(), crane_model::DQ::Zero(), payload);
+      ASSERT_TRUE(off.ok());
+      EXPECT_GT(passive_rows(off.value()).norm(), 1.0e1);
+      EXPECT_GT(actuated_rows(tau.value()).norm(), 1.0e3);
+    }
+  }
+}
+
+TEST(CraneModelEquilibrium, TheReturnedPoseIsTheOneTheToolHangsAt)
+{
+  // A critical point of the potential is not yet an equilibrium the tool settles
+  // at: the two-hinge pendulum has four of them and two are the tool standing up.
+  // They satisfy h_u = 0 exactly as well, so the test that the returned pose is
+  // the hanging one is against the *minimum* of the same potential energy the
+  // model never evaluates -- the oracle of PassiveRowsVanishAtTheEquilibrium,
+  // asked for the same q_a.
+  //
+  // 1e-6 rad is the search's accuracy, not the model's: the oracle sits down in
+  // the well by Newton on a central difference of an energy of order 1e5 J.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    const crane_model::QA q_a = actuated_rows(loaded_configuration());
+    for (const auto& payload : {empty_gripper(), block_payload()}) {
+      energy::Reference reference(tool, model.value().urdf_joint_names());
+      reference.add_payload(payload);
+      const crane_model::QU expected =
+        energy::equilibrium(reference, settled_configuration(q_a, crane_model::QU::Zero()));
+
+      const auto settled = model.value().passive_equilibrium(q_a, payload);
+      ASSERT_TRUE(settled.ok()) << settled.status().message;
+      EXPECT_LT((settled.value() - expected).norm(), 1.0e-6)
+        << "q_eq = " << settled.value().transpose() << ", energy minimum = "
+        << expected.transpose();
+
+      // And it is a pose the description lets the double hinge reach. Both
+      // machine descriptions bound the tilt to a quarter turn around pi/2, which
+      // is what makes "hanging" a statement about a reachable pose at all.
+      EXPECT_GT(settled.value()[0], -M_PI_2);
+      EXPECT_LT(settled.value()[0], M_PI_2);
+      EXPECT_GT(settled.value()[1], 0.785398);
+      EXPECT_LT(settled.value()[1], 2.35619);
+    }
+  }
+}
+
+TEST(CraneModelEquilibrium, AnOffsetGraspCarriesTheLoadBackUnderThePivot)
+{
+  // robot_model §5.1, and the direction it predicts rather than only the
+  // magnitude: the passive joints hold the tool so that the payload hangs under
+  // the passive pivot, so a grasp offset in K8 does not displace the load -- it
+  // tilts the tool until the offset is taken up. This is the property issue 033's
+  // payload estimate inverts, which is why it is asserted here and not there.
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  const crane_model::QA q_a = actuated_rows(loaded_configuration());
+  const Eigen::Vector3d centred(0.0, 0.0, 0.55);
+  const double offset = 0.05;
+
+  // Where the payload's centre of mass ends up, horizontally, relative to the
+  // pivot the two passive joints hang the tool from -- K5_inner_telescope, the
+  // parent of the tip hinge. Both come out of the public forward kinematics.
+  const auto horizontal_offset =
+    [&](const crane_model::QU& q_u, const Eigen::Vector3d& centre_of_mass) {
+      const crane_model::Q q = settled_configuration(q_a, q_u);
+      const auto pivot = model.value().forward_kinematics(
+        q, crane_model::Frame::MountingBase, crane_model::Frame::Tip);
+      const auto tool = model.value().forward_kinematics(
+        q, crane_model::Frame::MountingBase, crane_model::Frame::RotatorLowerPart);
+      EXPECT_TRUE(pivot.ok());
+      EXPECT_TRUE(tool.ok());
+      const Eigen::Vector3d load =
+        tool.value().position_m + tool.value().orientation.toRotationMatrix() * centre_of_mass;
+      return (load - pivot.value().position_m).head<2>().eval();
+    };
+
+  const auto settled_with = [&](const Eigen::Vector3d& centre, double mass_kg) {
+      crane_model::Payload payload = block_payload();
+      payload.center_of_mass_k8_m = centre;
+      payload.mass_kg = mass_kg;
+      const auto settled = model.value().passive_equilibrium(q_a, payload);
+      EXPECT_TRUE(settled.ok()) << settled.status().message;
+      return settled.ok() ? settled.value() : crane_model::QU::Zero().eval();
+    };
+
+  const Eigen::Vector3d offset_centre = centred + Eigen::Vector3d(offset, 0.0, 0.0);
+  const crane_model::QU nominal = settled_with(centred, block_payload().mass_kg);
+  const crane_model::QU shifted = settled_with(offset_centre, block_payload().mass_kg);
+
+  // Held at the centred equilibrium, an offset grasp puts the load off to the
+  // side by very nearly the offset itself: that is the error §5.1 calls the whole
+  // placement budget.
+  const Eigen::Vector2d unmoved = horizontal_offset(nominal, centred);
+  const Eigen::Vector2d displaced = horizontal_offset(nominal, offset_centre) - unmoved;
+  EXPECT_NEAR(displaced.norm(), offset, 0.1 * offset);
+
+  // Letting the tool settle takes most of that back. The equilibrium moved in the
+  // direction that carries the offset load toward the pivot -- toward it, not
+  // past it, which is what the positive projection says and what a mere "it
+  // moves" test would not catch.
+  const Eigen::Vector2d taken_up = horizontal_offset(shifted, offset_centre) - unmoved;
+  EXPECT_GT(taken_up.dot(displaced), 0.0) << "the tilt carried the load past the pivot";
+  EXPECT_LT(taken_up.norm(), 0.7 * displaced.norm())
+    << "the equilibrium did not carry the offset grasp back toward the pivot";
+  EXPECT_GT((shifted - nominal).norm(), 1.0 * M_PI / 180.0)
+    << "an offset grasp barely moved the equilibrium";
+
+  // What is left is the crane's own tool, which hangs centred and is worth a
+  // couple of hundred kilograms itself, so it is the *combined* centre of mass
+  // that ends up under the pivot and the payload's own stops short by the mass
+  // ratio §5.1 implies. Ten times the block -- a payload the model has no opinion
+  // about -- and what is left over shrinks with that ratio rather than staying
+  // put, which is what says the mechanism is the one §5.1 describes and not a
+  // coincidence at one mass.
+  const crane_model::QU heavy = settled_with(offset_centre, 10.0 * block_payload().mass_kg);
+  const Eigen::Vector2d heavy_taken_up = horizontal_offset(heavy, offset_centre) - unmoved;
+  EXPECT_LT(heavy_taken_up.norm(), 0.3 * taken_up.norm())
+    << "a ten times heavier grasp left the same offset behind";
+}
+
+TEST(CraneModelEquilibrium, APoseTheToolCannotHangAtIsAFailureNotAPlausibleAnswer)
+{
+  // Contract §5: a failed solve is a non-Ok Status, never a pose. The code is
+  // `SingularConfiguration` and it is the same code `full_dynamics` and
+  // `reduced_actuated_dynamics` already use when the passive rows do not resolve
+  // at a configuration -- one condition, one code, so a caller that already
+  // branches on it does not learn a second one. A solver that always reported
+  // success would leave the caller no signal at all: mpc §2 would damp the sway
+  // toward the invented pose and trajectory_planning §6 would make it an
+  // endpoint, and both would look like a tuning problem.
+  const auto payload = block_payload();
+  const auto singular = crane_model::ErrorCode::SingularConfiguration;
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+
+  // The arm folded to the description's own upper limit. The tool then needs
+  // more tip travel than the description gives that joint before it points down,
+  // so it would come to rest against a stop rather than hang, and there is no
+  // pose to return.
+  crane_model::Q folded = loaded_configuration();
+  folded[2] = 4.6;
+  const auto stowed = model.value().passive_equilibrium(actuated_rows(folded), payload);
+  EXPECT_FALSE(stowed.ok());
+  EXPECT_EQ(stowed.status().code, singular);
+  EXPECT_FALSE(stowed.status().message.empty());
+
+  // The same crane with gravity the other way up. Every pose the double hinge
+  // reaches is then a pose the tool is being pushed away from, so the solve has
+  // no well to settle in -- and, crucially, it does not answer with the pose it
+  // would have hung at, which still solves h_u = 0 and is now the unstable one.
+  const auto inverted = model_with_gravity(
+    crane_model::Tool::Pzs100, Eigen::Vector3d(0.0, 0.0, 9.81));
+  ASSERT_TRUE(inverted.ok());
+  const auto upside_down =
+    inverted.value().passive_equilibrium(actuated_rows(loaded_configuration()), payload);
+  EXPECT_FALSE(upside_down.ok());
+  EXPECT_EQ(upside_down.status().code, singular);
+
+  // And the ordinary input validation, on the production model rather than on the
+  // mock: an unknown payload is not a zero-mass one, and a q_a that is not finite
+  // is refused before anything is evaluated.
+  EXPECT_EQ(
+    model.value().passive_equilibrium(
+      actuated_rows(loaded_configuration()), crane_model::Payload{}).status().code,
+    crane_model::ErrorCode::InvalidPayload);
+  EXPECT_EQ(
+    model.value().passive_equilibrium(
+      crane_model::QA::Constant(std::numeric_limits<double>::quiet_NaN()), payload).status().code,
+    crane_model::ErrorCode::NonFiniteInput);
 }
 
 TEST(CraneModelDynamics, ThePayloadIsTheBodyRobotModelSaysItIs)

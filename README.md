@@ -12,8 +12,9 @@ graph contracts.
 | `cylinder_jacobian`, `transmission`, `cylinder_force` | closed-form cylinder geometry of `wiki/hydraulics.md` §2–§4 |
 | `forward_kinematics`, `jacobian` | Pinocchio, on the `robot_description_xml` the caller supplies |
 | `full_dynamics`, `inverse_dynamics`, `reduced_actuated_dynamics` | Pinocchio `crba`, `nonLinearEffects` and `rnea` on the same model |
+| `passive_equilibrium` | Newton on the passive rows of `rnea`, with Pinocchio's gravity Jacobian |
 | `collision_query`, `collision_queries` | Coal, over geometry fitted to the same description |
-| `passive_equilibrium`, `symbolic_graph` | `BackendUnavailable` at runtime |
+| `symbolic_graph` | `BackendUnavailable` at runtime |
 
 `Model::create` parses the description with Pinocchio and maps the canonical
 eight coordinates of contract §2 onto it by their URDF joint names, which keep
@@ -151,6 +152,101 @@ afterwards. That is fixed-size spatial arithmetic rather than an allocation, but
 it means a dynamics call briefly mutates the model as well as its `Data` — one
 more reason a `Model` must not be called from two threads at once.
 
+## Passive equilibrium
+
+`passive_equilibrium(q_a, payload)` is `wiki/robot_model.md` §2.3: the pose the
+two passive joints settle at once the actuated ones are held and the tool has
+stopped swinging, i.e. the $q_\text{u}$ solving
+
+$$\vec h_\text{u}(q_\text{a}, q_\text{eq}, \vec 0) = \vec 0$$
+
+At $\dot q = \vec 0$ every velocity-dependent term of §1 drops out of $\vec h$ —
+Coriolis, centrifugal and $\mat D\dot q$ alike — so the condition says the passive
+rows of the *gravity* torque vanish, which makes $q_\text{eq}$ a critical point of
+the potential energy over those two coordinates. The solve is Newton on exactly
+that residual, taken from `rnea`, so the quantity it drives to zero is literally
+the passive rows of `inverse_dynamics(q, 0, 0, payload)` — the invariant contract
+§7 states. `ThePassiveRowsVanishAtTheReturnedPose` is the acceptance test and it
+asserts it through that public call, not against the solver.
+
+**The residual bound is `1e-8` N m.** The passive rows carry order `1e3` N m of
+individual gravity terms that cancel at the equilibrium, so double precision
+leaves a noise floor near `1e-13` N m; against a restoring stiffness of `2e3`
+N m/rad the bound is an angle error below `1e-11` rad. Measured on both
+descriptions the returned pose comes out between `2e-13` and `7e-9` N m.
+
+### Hanging is not the same as solving the equation
+
+A two-hinge pendulum has four critical points, and two of them are the tool
+standing *up*. They satisfy $\vec h_\text{u} = \vec 0$ exactly as well as the
+hanging one does, and returning one would be silently wrong three ways over:
+`mpc` §2 damps the sway toward this pose, `trajectory_planning` §6 makes it a
+trajectory endpoint, and issue 033's payload estimate inverts it. What separates
+them is the sign of the passive stiffness $\partial\vec h_\text{u}/\partial
+q_\text{u}$, which is the Hessian of that same potential, so **the returned pose
+is required to have a positive definite one** — checked at every iterate rather
+than only at the end.
+
+That still leaves which well to start in, and the description answers it: the
+solve samples the range the two passive joints are given there — $\pm\pi/2$ of tip
+and a quarter turn either side of $\pi/2$ of tilt, in both machine descriptions —
+on a 5×5 grid, and starts Newton at the sample with the smallest residual *among
+those with a positive definite stiffness*. Which critical point this library
+returns is therefore the description's statement and not one made here. A
+description that leaves a passive joint unbounded falls back to a full turn.
+
+`TheReturnedPoseIsTheOneTheToolHangsAt` checks the result against the minimum of
+the potential energy of the same description — `computePotentialEnergy`, which
+this library never calls — so the branch, and not only the equation, has an
+independent oracle.
+
+### An offset grasp
+
+`wiki/robot_model.md` §5.1: the passive joints hold the tool so that the
+*combined* centre of mass hangs under the passive pivot, so a grasp that is not
+centred tilts the tool at rest. `AnOffsetGraspCarriesTheLoadBackUnderThePivot`
+asserts the direction and not only that something moved: 5 cm of lateral offset in
+`K8` displaces the payload's centre of mass by 5 cm if the tool is held at the
+centred equilibrium, and letting it settle takes most of that back — toward the
+pivot, not past it. It does not take all of it back, because the crane's own tool
+hangs centred and is worth a couple of hundred kilograms; ten times the block
+leaves proportionally less over, which is what says the mechanism is the mass
+ratio §5.1 implies.
+
+### When there is nowhere to hang
+
+`SingularConfiguration`, which is the code `full_dynamics` and
+`reduced_actuated_dynamics` already use when the passive rows do not resolve at a
+configuration — one condition, one code. It covers three cases and none of them
+returns a pose:
+
+- the crane folded far enough that the free hanging pose needs more tip travel
+  than the description gives that joint, so the tool would come to rest against a
+  stop instead of hanging. The arm at its own upper limit is one;
+- nothing in the passive range has a restoring stiffness at all — gravity turned
+  the other way up is the test case, and there the *unstable* pose still solves
+  the equation, so a solver without the stiffness test would answer with it;
+- the iteration budget exhausted, or the description unable to produce finite
+  numbers at that configuration.
+
+A solver that always reported success would remove the only signal a caller has,
+and all three of `mpc` §2, `trajectory_planning` §6 and issue 033 would read the
+invented pose as a tuning problem. An unknown payload is `InvalidPayload` and a
+non-finite `q_a` is `NonFiniteInput`, as everywhere else here.
+
+### What it costs
+
+The call **allocates nothing** after construction — the gravity-Jacobian
+workspace is sized once in `create()` like every other buffer — so contract §10
+does not put it behind a prepared workspace, and
+`RealTimeCallsAllocateNothingAfterConstruction` covers it alongside the other
+eight. That is a statement about allocation and not about cost: one call is up to
+25 gravity-Jacobian passes for the seed grid plus a handful of Newton steps at two
+Pinocchio passes each, so it is **tens of `rnea` evaluations, not one**, and its
+worst case is bounded by the grid and by the 32-step iteration budget. Treat it as
+a per-plan or per-grasp quantity — which is how `trajectory_planning` §6 and issue
+033 use it — rather than something to recompute every control cycle.
+
 ### Failure
 
 A non-finite `q`, `dq`, `ddq` or `ddq_a` is `NonFiniteInput`. A configuration at
@@ -219,11 +315,11 @@ are in `K0_mounting_base`.
 
 `collision_queries` returns a dynamically sized container and is therefore **not
 an RT API call** (contract §10); neither is `collision_query`, which shares its
-implementation. The allocation guard in the contract test covers the eight calls
-that are RT — the three hydraulic ones, `forward_kinematics`, `jacobian` and the
-three rigid-body dynamics calls — and `CollisionQueriesIsNotARealTimeCall`
-demonstrates that collision allocates, so the guard's silence about it is a fact
-rather than an oversight.
+implementation. The allocation guard in the contract test covers the nine calls
+that allocate nothing — the three hydraulic ones, `forward_kinematics`,
+`jacobian`, the three rigid-body dynamics calls and `passive_equilibrium` — and
+`CollisionQueriesIsNotARealTimeCall` demonstrates that collision allocates, so the
+guard's silence about it is a fact rather than an oversight.
 
 ### The scene arrives in `K0_mounting_base`
 
@@ -314,10 +410,11 @@ oracle is the **energy** of the same description — `computeKineticEnergy` and
 `computePotentialEnergy`, which the library never calls — plus the public
 Jacobian. $T$ checks `M`, $\partial U/\partial q$ checks the gravity part of the
 bias, the minimum of $U$ over the two passive coordinates locates the equilibrium
-of §2.3 without any torque algorithm being asked, and the reduction of §3.4 is
-recovered from `inverse_dynamics` alone by solving its passive rows to zero. If
-one of them fails, the disagreement is with the description, not with a
-transcription of the same algebra.
+of §2.3 — and now also checks the one `passive_equilibrium` returns — without any
+torque algorithm being asked, and the reduction of §3.4 is recovered from
+`inverse_dynamics` alone by solving its passive rows to zero. If one of them
+fails, the disagreement is with the description, not with a transcription of the
+same algebra.
 
 Build this package in the integration workspace so Eigen and retained
 dependencies are available:
