@@ -14,7 +14,7 @@ graph contracts.
 | `full_dynamics`, `inverse_dynamics`, `reduced_actuated_dynamics` | Pinocchio `crba`, `nonLinearEffects` and `rnea` on the same model |
 | `passive_equilibrium` | Newton on the passive rows of `rnea`, with Pinocchio's gravity Jacobian |
 | `collision_query`, `collision_queries` | Coal, over geometry fitted to the same description |
-| `symbolic_graph` | `BackendUnavailable` at runtime |
+| `symbolic_graph` | CasADi, through Pinocchio's own algorithms over `casadi::SX` |
 
 `Model::create` parses the description with Pinocchio and maps the canonical
 eight coordinates of contract §2 onto it by their URDF joint names, which keep
@@ -23,9 +23,10 @@ description that will not parse is `InvalidRobotDescription`, one that does not
 carry a canonical joint is `MissingJoint` — including the tool-dependent `q8`,
 so the wrong tool against the wrong description is caught at construction.
 
-Pinocchio and Coal are *private* implementation details: they appear in no
-public header, and a consumer links the shared libraries without ever seeing
-them (contract §6). CasADi is still absent.
+Pinocchio, Coal and CasADi are *private* implementation details: they appear in
+no public header, and a consumer links the shared libraries without ever seeing
+them (contract §6). The one exception is deliberate and is opt-in — see
+**The symbolic graph** below.
 
 ### Frames
 
@@ -374,6 +375,139 @@ the bound is `mpc` §3's state constraint, and the planner is the side that know
 it. §4.3 prescribes inflating the geometry; this note is a deliberate departure,
 because inflation cannot be expressed through the frozen API and the two
 alternatives above are exactly as tight.
+
+## The symbolic graph
+
+`symbolic_graph(spec, payload)` is contract §9. `wiki/mpc.md` §5.2 exports the
+acados model from it and `wiki/trajectory_planning.md` §5.2 builds the timing
+OCP from it, "so there is one dynamics implementation in the system rather than
+two". That sentence is the whole requirement, and this is how it is met.
+
+### It is not a second implementation
+
+The graph does not restate the equations of motion. It runs **the same two
+Pinocchio algorithms** — `crba` and `nonLinearEffects` — over `casadi::SX`
+instead of `double`, on the same parsed description, through the same
+projection $\mat P$, with the same damping and the same payload body. The
+cylinder transmission is one function template (`src/cylinder_geometry.hpp`)
+that `cylinder_jacobian` and the graph each instantiate. What `src/symbolic_graph.cpp`
+writes out is only the assembly: which rows go where, and the Schur complement
+of `wiki/robot_model.md` §3.1.
+
+`test_symbolic_graph` is the acceptance test, and it checks the graph against
+public *numeric* calls at a spread of configurations, velocities and payloads —
+never against a second copy of the algebra:
+
+| Graph | Oracle | Agreement |
+|---|---|---|
+| $\ddot q_\text{u}$ from `f` | passive rows of `inverse_dynamics` at that $\ddot q$ vanish | `1e-6` N m, the bound contract §7's invariant uses |
+| $\vec\tau_\text{a}$ from `z` | $\bar{\mat M}\vec u + \bar{\vec h}$ of `reduced_actuated_dynamics` | `1e-9` relative |
+| $\mat M_\text{uu}$, $\mat M_\text{ua}$, $\vec h_\text{u}$ | the same rows of `full_dynamics` | `1e-9` relative |
+| $\vec v$ from `z` | `transmission().cylinder_velocity` | exact |
+| $\vec Q$ from `z` | `transmission().pump_flow` | the smoothing bound below |
+
+The relative bounds are round-off: the two run the same double arithmetic and
+differ only in the order the projection sums are accumulated.
+
+### What the output map carries
+
+`SymbolicGraphSpec::include_output_map` asks for $\vec z$, the algebraic output
+of `wiki/nomenclature.md` §10, in four blocks of six: $\vec\tau_\text{a}$,
+$\vec F_\text{cyl}$, $\vec v$ and $\vec Q$. That is what `mpc` §2 costs and what
+§3 constrains, so a consumer does not rebuild the transmission inside its own
+solver — constraint 6 becomes the box $\abs{F_i}\le F_i^{\max}$ and constraint 7
+the sum $\sum_i Q_i \le Q_\text{P}^{\max}$. The limits themselves are the
+consumer's; nothing here compiles in an $F_i^{\max}$.
+
+$\vec Q$ is **smoothed**, and must be: `mpc` §3.1 requires both non-smooth
+pieces of constraint 7 to be smoothed for a gradient-based solver, so the graph
+carries $A_i^{\pm}(v)\sqrt{v^2+\eps^2}$ with a `tanh` of width $\eps_v$ in place
+of the step at $v=0$. `Model::transmission` keeps the physical step, because it
+is not being differentiated. The two therefore differ by
+
+$$\abs{\Delta Q_i} \le A_i\eps + \tfrac12\abs{A_i^{+}-A_i^{-}}\left(1-\tanh\frac{\abs{v_i}}{\eps_v}\right)\abs{v_i}$$
+
+with $\eps = 10^{-6}$ and $\eps_v = 10^{-3}$ m/s compiled in — `SymbolicGraphSpec`
+is frozen and has nowhere to carry them. That is around `1e-8` m³/s once an axis
+is moving at more than a few millimetres per second, and it is the bound the
+test asserts rather than a tolerance picked to pass.
+
+### The CasADi handles live in a separate target
+
+Contract §9 keeps `casadi::SX` and `casadi::MX` out of the public header, and
+`test/consumer_public_only.cpp` enforces it rather than documenting it: that
+fixture links `crane_model` alone, includes only `crane_model/model.hpp`, and
+fails to compile if a CasADi include guard or `casadi::SX` reached it. It does
+*not* claim CasADi is unreachable in the absolute — CasADi is installed under
+`/usr/local/include`, a default system include directory, so no target in this
+image can be denied it.
+
+A consumer that wants the functions links **`crane_model::casadi_graph`**, which
+is installed under its own include root (`include/crane_model_casadi_graph/`) so
+that linking `crane_model` alone does not put it on the path:
+
+```cmake
+find_package(crane_model REQUIRED)
+target_link_libraries(crane_mpc PRIVATE crane_model::casadi_graph)
+```
+
+```cpp
+#include "crane_model/symbolic/casadi_graph.hpp"
+
+const auto graph = crane_model::symbolic::casadi_graph(config, spec, payload);
+// graph.value()->f, ->F_disc, ->z, ->passive_rows
+```
+
+`f`, `z` and `passive_rows` are `SXFunction`s, which is what acados exports
+from; `F_disc` is the one `MXFunction`, an ERK4 step of `sample_time_s` that
+calls `f` four times instead of carrying four copies of its expression graph.
+`mpc` §5.2 says an explicit integrator is enough — with the ideal inner loop the
+model is not stiff.
+
+It takes a `ModelConfig` and not a `Model` because it has to. `Model` keeps its
+parse behind a private pimpl, the public header is frozen, and `Model` has no
+friends — so there is no route from a `const Model&` to what it parsed and no
+member to add one to. Pass the same `ModelConfig` that built the `Model`. The
+description is parsed a second time, by the same `detail::parse` `Model::create`
+uses, so it is one implementation invoked twice and not two.
+
+### It is not a real-time call
+
+Contract §10 lists symbolic-graph creation as non-real-time and this is one.
+Building a graph copies the model, parses (on the `casadi_graph` route), builds
+a few thousand expression nodes and evaluates them once — about 30 ms and
+thousands of allocations for either machine description.
+`BuildingAGraphIsNotARealTimeCall` demonstrates the allocation rather than
+asserting the absence of it. **Nothing on the 100 Hz path constructs one**: the
+controller receives a graph that was built during configuration, or does not use
+one at all.
+
+### Failure
+
+The payload is baked into the graph as a constant, so an invalid payload is
+`InvalidPayload` and a description without `K8_rotator_lower_part` is
+`FrameUnavailable`, both before CasADi is reached. A `sample_time_s` that is not
+finite and positive is `InvalidArgument`: it is not a discretization step.
+
+`SymbolicBackendFailure` is what a backend that cannot produce a usable graph
+returns, and it returns **no graph at all** — never a handle whose dimensions
+are zero. Two things reach it: an exception out of CasADi or Pinocchio, and a
+graph that builds but does not evaluate to finite numbers at the description's
+own neutral configuration. The second is a real case and is what the test uses:
+a description with no mass anywhere has a singular $\mat M_\text{uu}$ at every
+configuration, so the passive rows are $0/0$, and a consumer has to be told that
+here rather than by its first solve. The dimensions the public handle reports
+are read back off the built functions for the same reason.
+
+### What is deliberately not here
+
+No optimal control problem: cost, constraints, horizon, solver and tuning belong
+to the planner and the MPC. No acados. No code generation as a build step —
+CasADi's `Function::generate` is available to a consumer that wants it, and
+nothing here writes C to disk. The payload is a constant in the graph, not a
+parameter, which is the signature contract §9 froze; issue 033's streamed
+payload estimate will want it as a `casadi::SX` parameter instead, and that is a
+contract change under §12.
 
 ## Test fixtures
 

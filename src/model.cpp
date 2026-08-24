@@ -30,6 +30,8 @@
 #include <pinocchio/algorithm/rnea-derivatives.hpp>
 
 #include "collision_model.hpp"
+#include "cylinder_geometry.hpp"
+#include "symbolic_graph.hpp"
 
 namespace crane_model
 {
@@ -110,331 +112,57 @@ bool valid_frame(Frame frame)
   return static_cast<std::size_t>(frame) < kFrameCount;
 }
 
-// The six actuated axes in the canonical projection [0, 1, 2, 3, 6, 7] of the
-// model API contract §2, i.e. the hardware axis codes SW, HA, KA, SA, RO, GR.
-enum AxisIndex : std::size_t
-{
-  kSlewingAxis = 0,
-  kBoomAxis = 1,
-  kArmAxis = 2,
-  kTelescopeAxis = 3,
-  kRotatorAxis = 4,
-  kToolAxis = 5,
-};
-
-// The actuated projection [0, 1, 2, 3, 6, 7] and the passive projection [4, 5]
-// of the model API contract §2, i.e. I_a and I_u of wiki/robot_model.md §0.1.
-// Every block of M and every row of h below is gathered through these; nothing
-// in this file assumes the two classes are contiguous, because they are not.
-constexpr std::array<Eigen::Index, kActuatedDof> kActuatedRows{{0, 1, 2, 3, 6, 7}};
-constexpr std::array<Eigen::Index, kPassiveDof> kPassiveRows{{4, 5}};
-
-// Machine constants, wiki/hydraulics.md §6. They are verified there against
-// parameter_def.cpp and the URDF; symbols follow wiki/nomenclature.md §7.
-constexpr double kGearRadius = 0.1;               // r_gear, m
-constexpr double kMotorDisplacement = 1.4324e-4;  // V_m, m^3/rad
-
-constexpr double kSlewingPistonArea = 6.362e-3;      // A_A, q1
-constexpr double kBoomPistonArea = 1.5394e-2;        // A_A, q2
-constexpr double kBoomAnnulusArea = 9.032e-3;        // A_B, q2
-constexpr double kArmPistonArea = 6.362e-3;          // A_A, q3
-constexpr double kArmAnnulusArea = 2.5133e-3;        // A_B, q3
-constexpr double kTelescopePistonArea = 3.8485e-3;   // A_A, q4
-constexpr double kTelescopeAnnulusArea = 2.592e-3;   // A_B, q4
-constexpr double kToolPistonArea = 7.854e-3;         // A_A, q8
-constexpr double kToolAnnulusArea = 4.737e-3;        // A_B, q8
-
-// Boom four-bar, wiki/hydraulics.md §2.2 with the values of §6.2. Every length
-// here except the two bar lengths is also a placement in the real description,
-// and CraneModelDescription.LinkageConstantsAgreeWithTheDescription asserts
-// that the two agree; the split of a_2 from p_S2x exists so each side of that
-// sum can be checked against the frame that carries it.
-constexpr double kBoomFootX = 0.433;             // p_S0
-constexpr double kBoomFootY = -1.7682;
-constexpr double kBoomPivotX = -0.12;            // p_S1
-constexpr double kBoomPivotY = -0.07;
-constexpr double kBoomJointToLinkX = 3.49288;    // a_2, theta2 joint to K2_boom
-constexpr double kBoomAttachmentX = -3.039;      // p_S2x, in K2_boom
-constexpr double kBoomLinkX = kBoomJointToLinkX + kBoomAttachmentX;
-constexpr double kBoomLinkY = -0.036034;         // p_S2y
-// r_13 and r_23. The description closes this loop only in Gazebo, so neither
-// bar length is a placement Pinocchio can read back out of it.
-constexpr double kDrawbarLength = 0.57;          // r_13, Zugstange
-constexpr double kPushbarLength = 0.124;         // r_23, Druckstange
-
-// Arm cylinder, wiki/hydraulics.md §2.3 with the values of §6.2. The lateral
-// term is p_S4y - p_S3z and not p_S4z - p_S3z because the two attachment
-// points live in links with different CAD-to-model rotations; see the callout
-// in §2.3 before "normalising" it.
-constexpr double kArmFootX = -1.6802;              // p_S3x
-constexpr double kArmFootY = -0.0485;              // p_S3y
-constexpr double kArmFootZ = 0.224;                // p_S3z
-constexpr double kArmJointToLinkX = -0.3925;       // a_3, theta3 joint to K3_arm
-constexpr double kArmAttachmentX = 0.274489;       // p_S4x
-constexpr double kArmAttachmentY = 0.224;          // p_S4y
-constexpr double kArmLinkX = kArmJointToLinkX + kArmAttachmentX;
-constexpr double kArmLinkY = -0.468;               // -p_S4z
-constexpr double kArmLateralOffset = kArmAttachmentY - kArmFootZ;
-
-// 7040 jaw four-bar, wiki/hydraulics.md §2.6. §6.2 carries none of its numbers,
-// so every constant below is ported from the deployed model under src/ and
-// names the file it came from. None of them is a §6.2 value.
-//
-// The fitted mirror law phi_sim,9(q8), which §2.6 says is the variant the
-// deployed model uses, in the Horner form of
-// timber_crane_model_cpp/include/timber_crane_model_cpp/maple/
-// comp_eq_four_bar.hpp:7, with jaw_linkage_p of
-// crane_tools_description/7040/config/gripper_parameter.yaml:13.
-constexpr double kJawMirrorQuadratic = -0.121220;  // p_0
-constexpr double kJawMirrorLinear = 1.400122;      // p_1
-constexpr double kJawMirrorConstant = -0.227867;   // p_2
-
-// The two jaw pivots on the pincer frame and the two jaw arm lengths. The
-// deployed model reads them from the URDF DH transforms in
-// timber_crane_parameter/src/parameter_def.cpp:196-206; the joint origins are
-// in crane_tools_description/7040/urdf/links/. Note a_9 and a_11 are the y and
-// a_10 and a_12 the x coordinate of their origin, per the comment there.
-constexpr double kOuterJawPivotOffset = 0.328;  // a_9, -dh_trans9 y
-constexpr double kOuterJawArmLength = 0.8126;   // a_10, dh_trans10 x
-constexpr double kInnerJawPivotOffset = 0.336;  // a_11, dh_trans11 y
-constexpr double kInnerJawArmLength = 0.8172;   // a_12, dh_trans12 x
-
-// The jaw cylinder's two attachment points. The barrel end sits on the outer
-// jaw, joint pincer_cylinder_mounting_outer_jaw_joint of crane_tools_description
-// /7040/urdf/joints/hydraulic/gripper_cylinder_joints.urdf.xacro:15. The rod end
-// sits on the inner jaw and is hard-coded in gripper_parameter.yaml:5-7 because
-// the URDF closes that loop only in Gazebo.
-constexpr double kJawCylinderOuterX = -0.8971;    // p_S7x
-constexpr double kJawCylinderOuterY = 0.01754;    // p_S7y
-constexpr double kJawCylinderInnerX = -0.908397;  // p_S8x
-constexpr double kJawCylinderInnerY = 0.015289;   // p_S8y
-
-// Effective areas per axis. a_a and a_b are the force-producing areas of §4,
-// a_eff_pos and a_eff_neg the direction-dependent pump draw of §3. The rotator
-// carries V_m in all four, in m^3/rad.
-struct AxisAreas
-{
-  double a_a{};
-  double a_b{};
-  double a_eff_pos{};
-  double a_eff_neg{};
-};
-
-std::array<AxisAreas, kActuatedDof> axis_areas()
-{
-  std::array<AxisAreas, kActuatedDof> areas{};
-  // q1 slewing: two cylinders, symmetric circuit, so both chambers see 2 A_A.
-  areas[kSlewingAxis] = {
-    2.0 * kSlewingPistonArea, 2.0 * kSlewingPistonArea,
-    2.0 * kSlewingPistonArea, 2.0 * kSlewingPistonArea};
-  // q2 boom: a single differential cylinder.
-  areas[kBoomAxis] = {
-    kBoomPistonArea, kBoomAnnulusArea, kBoomPistonArea, kBoomAnnulusArea};
-  // q3 arm: two differential cylinders, one expression (§2.3).
-  areas[kArmAxis] = {
-    2.0 * kArmPistonArea, 2.0 * kArmAnnulusArea,
-    2.0 * kArmPistonArea, 2.0 * kArmAnnulusArea};
-  // q4 telescope: regenerative on extension. Rod-side oil is fed back to the
-  // piston side, so only the annulus difference is drawn from the pump. The
-  // force still follows the physical areas, which is why a_a and a_eff_pos
-  // differ on this axis alone.
-  areas[kTelescopeAxis] = {
-    kTelescopePistonArea, kTelescopeAnnulusArea,
-    kTelescopePistonArea - kTelescopeAnnulusArea, kTelescopeAnnulusArea};
-  // q7 rotator: a motor, where V_m takes the role the piston area plays
-  // elsewhere (§2.5). Symmetric in both directions.
-  areas[kRotatorAxis] = {
-    kMotorDisplacement, kMotorDisplacement, kMotorDisplacement, kMotorDisplacement};
-  // q8 tool: a cylinder axis on the same pump, areas per §6.1.
-  areas[kToolAxis] = {
-    kToolPistonArea, kToolAnnulusArea, kToolPistonArea, kToolAnnulusArea};
-  return areas;
-}
-
-Eigen::Matrix2d planar_rotation(double angle)
-{
-  Eigen::Matrix2d rotation;
-  const double cosine = std::cos(angle);
-  const double sine = std::sin(angle);
-  rotation << cosine, -sine, sine, cosine;
-  return rotation;
-}
-
-// S_perp, the planar 90 degree rotation of wiki/nomenclature.md §7.
-Eigen::Matrix2d perpendicular()
-{
-  Eigen::Matrix2d s_perp;
-  s_perp << 0.0, -1.0, 1.0, 0.0;
-  return s_perp;
-}
-
-// Piston displacement s_i of one axis together with its transmission ratio
-// ds_i/dq_i, which is the diagonal entry of J_cyl. The frozen API exposes only
-// the ratio today; s_i is carried because the stroke limits of §6.3 are an
-// independent constraint on the two nonlinear axes and will need it.
-struct CylinderStroke
-{
-  double stroke_m{};
-  double ratio{};
-  bool valid{false};
-};
-
-// wiki/hydraulics.md §2.2. The cylinder drives the coupler point p_J of a
-// four-bar, not the boom directly, so s_2 is the distance from the cylinder
-// foot p_S0 to that coupler point. The derivative is the analytic chain rule
-// through p_J(d^2(q2)); it is exact, not a difference quotient.
-CylinderStroke boom_stroke(double q2)
-{
-  const Eigen::Vector2d p_s0(kBoomFootX, kBoomFootY);
-  const Eigen::Vector2d p_s1(kBoomPivotX, kBoomPivotY);
-  const Eigen::Matrix2d s_perp = perpendicular();
-
-  const Eigen::Vector2d p_s2 = planar_rotation(q2) * Eigen::Vector2d(kBoomLinkX, kBoomLinkY);
-  const Eigen::Vector2d d_pivot = p_s2 - p_s1;
-  const Eigen::Vector2d d_pivot_rate = s_perp * p_s2;  // d(p_S2)/dq2
-
-  const double d_squared = d_pivot.squaredNorm();
-  if (!(d_squared > 0.0)) {
-    return CylinderStroke{};
-  }
-  const double d_squared_rate = 2.0 * d_pivot.dot(d_pivot_rate);
-
-  const double reach_sum = kDrawbarLength + kPushbarLength;
-  const double reach_difference = kDrawbarLength - kPushbarLength;
-  const double delta = (reach_sum * reach_sum - d_squared) *
-    (d_squared - reach_difference * reach_difference);
-  if (!(delta > 0.0)) {
-    // The triangle inequality on d, r_13 and r_23 fails: the linkage cannot
-    // close at this q2, so there is no piston displacement to report.
-    return CylinderStroke{};
-  }
-
-  const double link_difference =
-    kDrawbarLength * kDrawbarLength - kPushbarLength * kPushbarLength;
-  const double alpha = (link_difference + d_squared) / (2.0 * d_squared);
-  const double alpha_rate = -link_difference / (2.0 * d_squared * d_squared) * d_squared_rate;
-
-  const double root = std::sqrt(delta);
-  const double delta_gradient =
-    reach_sum * reach_sum + reach_difference * reach_difference - 2.0 * d_squared;
-  // The branch is fixed by the derivation: the intersection whose local y is
-  // negative in the frame with p_S1 at the origin and p_S2 on +x (§2.2). Since
-  // S_perp d points along local +y, that is the negative root, and it is the
-  // branch whose stroke spans the s_2 limits of §6.3.
-  const double beta = -root / (2.0 * d_squared);
-  const double beta_rate =
-    -(delta_gradient * d_squared / root - 2.0 * root) /
-    (4.0 * d_squared * d_squared) * d_squared_rate;
-
-  const Eigen::Vector2d p_j = p_s1 + alpha * d_pivot + beta * (s_perp * d_pivot);
-  const Eigen::Vector2d p_j_rate = alpha_rate * d_pivot + alpha * d_pivot_rate +
-    beta_rate * (s_perp * d_pivot) + beta * (s_perp * d_pivot_rate);
-
-  const Eigen::Vector2d c_cyl = p_j - p_s0;
-  const double stroke = c_cyl.norm();
-  if (!(stroke > 0.0)) {
-    return CylinderStroke{};
-  }
-  return CylinderStroke{stroke, c_cyl.dot(p_j_rate) / stroke, true};
-}
-
-// wiki/hydraulics.md §2.3. A direct cylinder: the in-plane part rotates with
-// q3 while the out-of-plane offset stays constant.
-CylinderStroke arm_stroke(double q3)
-{
-  const Eigen::Vector2d moving = planar_rotation(q3) * Eigen::Vector2d(kArmLinkX, kArmLinkY);
-  const Eigen::Vector2d in_plane = moving - Eigen::Vector2d(kArmFootX, kArmFootY);
-  const Eigen::Vector2d in_plane_rate = perpendicular() * moving;
-
-  const double stroke =
-    std::sqrt(in_plane.squaredNorm() + kArmLateralOffset * kArmLateralOffset);
-  if (!(stroke > 0.0)) {
-    return CylinderStroke{};
-  }
-  return CylinderStroke{stroke, in_plane.dot(in_plane_rate) / stroke, true};
-}
-
-// wiki/hydraulics.md §2.6 for the 7040, composed the way the deployed model
-// composes it. The commanded outer-jaw angle q8 drives the inner jaw through
-// the quadratic fit phi_sim,9(q8), and the cylinder spans the two jaws, so its
-// length depends on both angles. Frames 19 and 20 of the deployed
-// comp_transform_8_19.hpp and comp_transform_8_20.hpp place the two pins: the
-// outer jaw hangs off -a_9 with its arm mirrored, the inner jaw off +a_11.
-// Planar, exactly as the deployed comp_transform_8_24.hpp is -- the two pins
-// are p_S8z + p_S7z = 24.25 mm apart out of plane, which the deployed model
-// drops and which is worth at most 0.6 mm of length over the jaw range.
-CylinderStroke jaw_stroke(double q8)
-{
-  const double mirror_angle =
-    (kJawMirrorQuadratic * q8 + kJawMirrorLinear) * q8 + kJawMirrorConstant;
-  const double mirror_rate = 2.0 * kJawMirrorQuadratic * q8 + kJawMirrorLinear;
-
-  const Eigen::Matrix2d s_perp = perpendicular();
-  Eigen::Matrix2d mirror;
-  mirror << -1.0, 0.0, 0.0, 1.0;
-
-  const Eigen::Vector2d outer_arm = planar_rotation(q8) *
-    Eigen::Vector2d(kOuterJawArmLength + kJawCylinderOuterX, kJawCylinderOuterY);
-  const Eigen::Vector2d inner_arm = planar_rotation(mirror_angle) *
-    Eigen::Vector2d(kInnerJawArmLength + kJawCylinderInnerX, kJawCylinderInnerY);
-
-  const Eigen::Vector2d c_cyl = inner_arm - mirror * outer_arm +
-    Eigen::Vector2d(kInnerJawPivotOffset + kOuterJawPivotOffset, 0.0);
-  const Eigen::Vector2d c_cyl_rate =
-    mirror_rate * (s_perp * inner_arm) - mirror * (s_perp * outer_arm);
-
-  const double stroke = c_cyl.norm();
-  if (!(stroke > 0.0)) {
-    return CylinderStroke{};
-  }
-  return CylinderStroke{stroke, c_cyl.dot(c_cyl_rate) / stroke, true};
-}
+// The canonical projections of contract §2 and the cylinder transmission of
+// wiki/hydraulics.md §2--§4 are shared with the symbolic graph rather than
+// written twice. `cylinder_geometry.hpp` carries the transmission as a template
+// over the scalar type, so `Model::cylinder_jacobian` below and contract §9's
+// CasADi graph evaluate one implementation of the four-bars; `symbolic_graph.hpp`
+// carries the two projections and the mimic bookkeeping for the same reason.
+using cylinder::AxisAreas;
+using cylinder::kArmAxis;
+using cylinder::kBoomAxis;
+using cylinder::kRotatorAxis;
+using cylinder::kSlewingAxis;
+using cylinder::kTelescopeAxis;
+using cylinder::kToolAxis;
+using detail::CoupledJoint;
+using detail::Drive;
+using detail::JointSlot;
+using detail::kActuatedRows;
+using detail::kMaxDrives;
+using detail::kPassiveRows;
 
 // J_cyl of wiki/nomenclature.md §7: diagonal by construction, because the
 // geometry does not couple the axes at all (§5.7).
+//
+// A configuration at which a linkage does not close leaves its ratio
+// non-finite rather than raising a flag, because the symbolic instantiation has
+// no configuration to raise one at. Here that non-finite ratio is this
+// configuration's `SingularConfiguration`, named per axis; the three constant
+// axes cannot reach it.
 Status fill_cylinder_jacobian(Tool tool, const Q& q, ActuatedJacobian& jacobian)
 {
   if (!finite(q)) {
     return failure(ErrorCode::NonFiniteInput, "q is not finite");
   }
+  static constexpr std::array<const char *, kActuatedDof> kDegenerate{{
+    "the slewing rack is degenerate",
+    "the boom four-bar does not close at this q2",
+    "the arm cylinder is degenerate at this q3",
+    "the telescope cylinder is degenerate",
+    "the rotator motor is degenerate",
+    "the 7040 jaw cylinder is degenerate at this q8"}};
 
+  const std::array<double, kActuatedDof> diagonal =
+    cylinder::jacobian_diagonal<double>(tool, q[1], q[2], q[7]);
   jacobian.setZero();
-  // q1 slewing: rack and pinion, the only constant transmission (§2.1).
-  jacobian(kSlewingAxis, kSlewingAxis) = kGearRadius;
-
-  const CylinderStroke boom = boom_stroke(q[1]);
-  if (!boom.valid) {
-    return failure(
-      ErrorCode::SingularConfiguration, "the boom four-bar does not close at this q2");
+  for (std::size_t axis = 0; axis < kActuatedDof; ++axis) {
+    if (!std::isfinite(diagonal[axis])) {
+      return failure(ErrorCode::SingularConfiguration, kDegenerate[axis]);
+    }
+    const Eigen::Index index = static_cast<Eigen::Index>(axis);
+    jacobian(index, index) = diagonal[axis];
   }
-  jacobian(kBoomAxis, kBoomAxis) = boom.ratio;
-
-  const CylinderStroke arm = arm_stroke(q[2]);
-  if (!arm.valid) {
-    return failure(
-      ErrorCode::SingularConfiguration, "the arm cylinder is degenerate at this q3");
-  }
-  jacobian(kArmAxis, kArmAxis) = arm.ratio;
-
-  // q4 telescope: the cylinder is one-to-one with the joint coordinate; the
-  // factor of two sits between q4 and the tip travel, not here (§2.4).
-  jacobian(kTelescopeAxis, kTelescopeAxis) = 1.0;
-  // q7 rotator: a motor, so the motor angle is the joint coordinate (§2.5).
-  jacobian(kRotatorAxis, kRotatorAxis) = 1.0;
-  // q8 tool (§2.6). The PZS100 rail cylinder is one-to-one with q8 and there is
-  // no linkage to solve; the 7040 jaw is a four-bar and its cylinder spans both
-  // jaws, so its ratio is configuration-dependent like the boom's.
-  if (tool == Tool::Pzs100) {
-    jacobian(kToolAxis, kToolAxis) = 1.0;
-    return Status{};
-  }
-
-  const CylinderStroke jaw = jaw_stroke(q[7]);
-  if (!jaw.valid) {
-    return failure(
-      ErrorCode::SingularConfiguration, "the 7040 jaw cylinder is degenerate at this q8");
-  }
-  jacobian(kToolAxis, kToolAxis) = jaw.ratio;
   return Status{};
 }
 
@@ -615,31 +343,6 @@ constexpr int kEquilibriumIterations = 32;
 // contract §10 does not exclude it, but the README says plainly that its cost is
 // a per-plan one and not a per-cycle one.
 constexpr int kEquilibriumSamples = 5;
-
-// One canonical coordinate's place in the parsed model. `unbounded` is the
-// `continuous` rotator of ROS 2 Interfaces §3.1: Pinocchio stores such a joint
-// as (cos, sin), so it occupies two configuration entries and one velocity
-// entry.
-struct JointSlot
-{
-  Eigen::Index config_index{0};
-  Eigen::Index velocity_index{0};
-  bool unbounded{false};
-};
-
-// A joint the description declares as a `<mimic>` of a canonical one. Two of
-// them matter here: `q5_small_telescope` mimics `q4_big_telescope`, which is
-// the second telescope stage of robot_model §0 and the doubling of
-// hydraulics §2.4, and the PZS100's `q11_right_rail_joint` mimics
-// `q9_left_rail_joint`, the simulation-only coupled joint of contract §2. The
-// multiplier and offset are read out of the description, not assumed.
-struct CoupledJoint
-{
-  JointSlot slot;
-  std::size_t source{0};  // canonical index driving this joint
-  double multiplier{1.0};
-  double offset{0.0};
-};
 
 // A canonical joint must exist and must be a single degree of freedom. The
 // contract calls a description that does not carry it `MissingJoint`; a
@@ -857,11 +560,162 @@ Status pair_distance(
 
 }  // namespace
 
+namespace detail
+{
+
+Status attach_payload(
+  pinocchio::Model& model, const PayloadMount& mount, const Payload& payload)
+{
+  Status status = check_payload(payload);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!mount.attachable) {
+    return failure(
+      ErrorCode::FrameUnavailable,
+      std::string("the robot description carries no link ") +
+      kFrameLinks[static_cast<std::size_t>(Frame::RotatorLowerPart)].link +
+      ", so a payload cannot be attached");
+  }
+  // Theta_L is about the payload's own centre of mass with the axes of K8,
+  // which is the URDF `<inertial>` convention; act() carries the whole body
+  // from K8 into the frame of the joint that moves it.
+  const pinocchio::Inertia body(
+    payload.mass_kg, payload.center_of_mass_k8_m, payload.inertia_k8_kg_m2);
+  model.inertias[mount.joint] = mount.bare_inertia + mount.placement.act(body);
+  return Status{};
+}
+
+// The description, parsed and mapped onto the canonical eight coordinates.
+// `Model::create` builds its implementation state out of what this returns and
+// `symbolic::casadi_graph` builds a CasADi graph out of a second call to it, so
+// the joint map, the mimic projection P, the damping and the payload mount are
+// one statement whichever way a caller arrives.
+Status parse(const ModelConfig& config, SymbolicSource& out)
+{
+  if (config.robot_description_xml.empty()) {
+    return failure(ErrorCode::InvalidRobotDescription, "robot_description_xml is empty");
+  }
+  if (!valid_tool(config.tool)) {
+    return failure(ErrorCode::UnsupportedTool, "tool is not supported");
+  }
+  if (!finite(config.gravity_m_s2) || config.gravity_m_s2.norm() <= 0.0) {
+    return failure(ErrorCode::InvalidArgument, "gravity_m_s2 must be finite and non-zero");
+  }
+
+  // The description is parsed twice on purpose. Pinocchio builds the kinematic
+  // tree and drops `<mimic>` -- with mimic parsing on it refuses this
+  // description outright, because the PZS100 declares the right rail as a mimic
+  // of a joint that comes *later* in its own depth-first order. urdfdom, which
+  // is Pinocchio's own URDF front end, still carries the mimic declarations, so
+  // the coupled joints are read from there rather than assumed.
+  ::urdf::ModelInterfaceSharedPtr tree;
+  try {
+    tree = ::urdf::parseURDF(config.robot_description_xml);
+    if (!tree) {
+      return failure(
+        ErrorCode::InvalidRobotDescription, "robot_description_xml is not valid URDF");
+    }
+    pinocchio::urdf::buildModelFromXML(config.robot_description_xml, out.model);
+  } catch (const std::exception& error) {
+    return failure(
+      ErrorCode::InvalidRobotDescription,
+      std::string("robot_description_xml could not be parsed: ") + error.what());
+  }
+  out.model.gravity.linear() = config.gravity_m_s2;
+  out.neutral = pinocchio::neutral(out.model);
+  out.tool = config.tool;
+
+  const std::array<std::string, kGeneralizedDof> canonical = joint_names(config.tool);
+  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+    Status status = bind_joint(out.model, canonical[index], out.joints[index]);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  for (const auto& entry : tree->joints_) {
+    const auto& joint = entry.second;
+    if (!joint || !joint->mimic) {
+      continue;
+    }
+    const auto driver = std::find(canonical.begin(), canonical.end(), joint->mimic->joint_name);
+    if (driver == canonical.end() || !out.model.existJointName(joint->name)) {
+      continue;
+    }
+    CoupledJoint coupled;
+    Status status = bind_joint(out.model, joint->name, coupled.slot);
+    if (!status.ok()) {
+      return status;
+    }
+    coupled.source = static_cast<std::size_t>(std::distance(canonical.begin(), driver));
+    coupled.multiplier = joint->mimic->multiplier;
+    coupled.offset = joint->mimic->offset;
+    out.coupled.push_back(coupled);
+  }
+
+  // P, one column per canonical coordinate: the coordinate's own row plus the
+  // rows of the mimics that follow it. Built once, so no dynamics call and no
+  // symbolic assembly has to walk the mimic list again.
+  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+    out.drives[index][0] = Drive{out.joints[index].velocity_index, 1.0};
+    out.drive_count[index] = 1;
+  }
+  for (const CoupledJoint& coupled : out.coupled) {
+    std::size_t& count = out.drive_count[coupled.source];
+    if (count == kMaxDrives) {
+      return failure(
+        ErrorCode::InvalidRobotDescription,
+        "a canonical joint is mimicked by more joints than this model carries rows for");
+    }
+    out.drives[coupled.source][count] = Drive{coupled.slot.velocity_index, coupled.multiplier};
+    ++count;
+  }
+
+  // D of robot_model §1. The description is its source
+  // (wiki/implementation/parameters.md §1), and §5 says those entries are the
+  // identified values on the actuated axes and the hand-tuned per-tool values on
+  // the two passive ones -- which is why reading them from the selected
+  // description gets the tool dependence right without a table here.
+  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+    const ::urdf::JointConstSharedPtr joint = tree->getJoint(canonical[index]);
+    if (joint && joint->dynamics) {
+      out.damping[static_cast<Eigen::Index>(index)] = joint->dynamics->damping;
+    }
+  }
+  // Except the telescope. parameters §5 calls its URDF damping a simulation
+  // stability hack an order of magnitude above the identified value and says it
+  // must not enter the model; no identified value is recorded anywhere in the
+  // vault, so the entry is zero rather than a guess. README says so.
+  out.damping[3] = 0.0;
+
+  // Where a payload attaches (robot_model §5): the joint that carries
+  // K8_rotator_lower_part, and the fixed placement of that link within it.
+  const char * const rotator_lower_part =
+    kFrameLinks[static_cast<std::size_t>(Frame::RotatorLowerPart)].link;
+  if (out.model.existFrame(rotator_lower_part)) {
+    const pinocchio::Frame& frame = out.model.frames[out.model.getFrameId(rotator_lower_part)];
+    out.mount.joint = frame.parentJoint;
+    out.mount.placement = frame.placement;
+    out.mount.bare_inertia = out.model.inertias[out.mount.joint];
+    out.mount.attachable = true;
+  }
+  return Status{};
+}
+
+}  // namespace detail
+
 struct SymbolicGraph::Impl
 {
   std::size_t state_dimension{0};
   std::size_t input_dimension{0};
   bool has_output_map{false};
+  // The built graph itself. The three dimensions above are read back off it in
+  // `build_graph`, so this handle is what makes them a measurement of a real
+  // graph rather than three compiled-in constants. The type is opaque here --
+  // contract §9 keeps CasADi out of anything a consumer of the public library
+  // sees, and that includes this translation unit.
+  detail::GraphHandle graph;
 };
 
 SymbolicGraph::SymbolicGraph(std::unique_ptr<Impl> impl) noexcept
@@ -931,19 +785,8 @@ struct Model::Impl
   std::array<pinocchio::FrameIndex, kFrameCount> frames{};
   std::array<bool, kFrameCount> frame_present{};
 
-  // One canonical coordinate's footprint in the parsed model's velocity vector:
-  // its own row, weight one, plus one row per `<mimic>` that follows it, weighted
-  // by that mimic's multiplier. dq_full = P dq and ddq_full = P ddq for the
-  // constant P these rows describe, so M = P^T M_full P and h = P^T h_full --
-  // which is how the second telescope stage and the mirrored rail get their
-  // inertia counted on the coordinate that drives them.
-  struct Drive
-  {
-    Eigen::Index velocity_index{0};
-    double weight{1.0};
-  };
-
-  static constexpr std::size_t kMaxDrives = 4;
+  // P of `symbolic_graph.hpp`, one column per canonical coordinate: the
+  // coordinate's own row plus the rows of the `<mimic>` joints that follow it.
   std::array<std::array<Drive, kMaxDrives>, kGeneralizedDof> drives{};
   std::array<std::size_t, kGeneralizedDof> drive_count{};
 
@@ -973,10 +816,7 @@ struct Model::Impl
   // for the duration of one call and restored afterwards. That is fixed-size
   // spatial arithmetic, not an allocation, and it is the same reason a Model
   // must not be called from two threads at once.
-  pinocchio::JointIndex payload_joint{0};
-  pinocchio::SE3 payload_placement{pinocchio::SE3::Identity()};
-  pinocchio::Inertia bare_inertia{pinocchio::Inertia::Zero()};
-  bool payload_attachable{false};
+  detail::PayloadMount mount;
 
   // One fitted primitive, bound to the link frame of the parsed description.
   struct Body
@@ -1086,30 +926,13 @@ struct Model::Impl
 
   Status attach_payload(const Payload& payload)
   {
-    Status status = check_payload(payload);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!payload_attachable) {
-      return failure(
-        ErrorCode::FrameUnavailable,
-        std::string("the robot description carries no link ") +
-        kFrameLinks[static_cast<std::size_t>(Frame::RotatorLowerPart)].link +
-        ", so a payload cannot be attached");
-    }
-    // Theta_L is about the payload's own centre of mass with the axes of K8,
-    // which is the URDF `<inertial>` convention; act() carries the whole body
-    // from K8 into the frame of the joint that moves it.
-    const pinocchio::Inertia body(
-      payload.mass_kg, payload.center_of_mass_k8_m, payload.inertia_k8_kg_m2);
-    model.inertias[payload_joint] = bare_inertia + payload_placement.act(body);
-    return Status{};
+    return detail::attach_payload(model, mount, payload);
   }
 
   void detach_payload()
   {
-    if (payload_attachable) {
-      model.inertias[payload_joint] = bare_inertia;
+    if (mount.attachable) {
+      model.inertias[mount.joint] = mount.bare_inertia;
     }
   }
 
@@ -1488,111 +1311,25 @@ Model::~Model() = default;
 
 Result<Model> Model::create(const ModelConfig& config)
 {
-  if (config.robot_description_xml.empty()) {
-    return Result<Model>::failure(
-      failure(ErrorCode::InvalidRobotDescription, "robot_description_xml is empty"));
-  }
-  if (!valid_tool(config.tool)) {
-    return Result<Model>::failure(
-      failure(ErrorCode::UnsupportedTool, "tool is not supported"));
-  }
-  if (!finite(config.gravity_m_s2) || config.gravity_m_s2.norm() <= 0.0) {
-    return Result<Model>::failure(
-      failure(ErrorCode::InvalidArgument, "gravity_m_s2 must be finite and non-zero"));
+  detail::SymbolicSource source;
+  Status status = detail::parse(config, source);
+  if (!status.ok()) {
+    return Result<Model>::failure(std::move(status));
   }
 
-  // The description is parsed twice on purpose. Pinocchio builds the kinematic
-  // tree and drops `<mimic>` -- with mimic parsing on it refuses this
-  // description outright, because the PZS100 declares the right rail as a mimic
-  // of a joint that comes *later* in its own depth-first order. urdfdom, which
-  // is Pinocchio's own URDF front end, still carries the mimic declarations, so
-  // the coupled joints are read from there rather than assumed.
-  ::urdf::ModelInterfaceSharedPtr tree;
-  pinocchio::Model parsed;
-  try {
-    tree = ::urdf::parseURDF(config.robot_description_xml);
-    if (!tree) {
-      return Result<Model>::failure(
-        failure(ErrorCode::InvalidRobotDescription, "robot_description_xml is not valid URDF"));
-    }
-    pinocchio::urdf::buildModelFromXML(config.robot_description_xml, parsed);
-  } catch (const std::exception& error) {
-    return Result<Model>::failure(
-      failure(
-        ErrorCode::InvalidRobotDescription,
-        std::string("robot_description_xml could not be parsed: ") + error.what()));
-  }
-  parsed.gravity.linear() = config.gravity_m_s2;
-
-  auto impl = std::make_unique<Impl>(std::move(parsed));
-  impl->tool = config.tool;
-  impl->names = joint_names(config.tool);
-  impl->areas = axis_areas();
-
-  const std::array<std::string, kGeneralizedDof>& canonical = impl->names;
-  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
-    Status status = bind_joint(impl->model, canonical[index], impl->joints[index]);
-    if (!status.ok()) {
-      return Result<Model>::failure(std::move(status));
-    }
-  }
-
-  for (const auto& entry : tree->joints_) {
-    const auto& joint = entry.second;
-    if (!joint || !joint->mimic) {
-      continue;
-    }
-    const auto source = std::find(canonical.begin(), canonical.end(), joint->mimic->joint_name);
-    if (source == canonical.end() || !impl->model.existJointName(joint->name)) {
-      continue;
-    }
-    CoupledJoint coupled;
-    Status status = bind_joint(impl->model, joint->name, coupled.slot);
-    if (!status.ok()) {
-      return Result<Model>::failure(std::move(status));
-    }
-    coupled.source = static_cast<std::size_t>(std::distance(canonical.begin(), source));
-    coupled.multiplier = joint->mimic->multiplier;
-    coupled.offset = joint->mimic->offset;
-    impl->coupled.push_back(coupled);
-  }
-
-  // P, one column per canonical coordinate: the coordinate's own row plus the
-  // rows of the mimics that follow it. Built once, so no dynamics call has to
-  // walk the mimic list again.
-  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
-    impl->drives[index][0] = Model::Impl::Drive{impl->joints[index].velocity_index, 1.0};
-    impl->drive_count[index] = 1;
-  }
-  for (const CoupledJoint& coupled : impl->coupled) {
-    std::size_t& count = impl->drive_count[coupled.source];
-    if (count == Model::Impl::kMaxDrives) {
-      return Result<Model>::failure(
-        failure(
-          ErrorCode::InvalidRobotDescription,
-          "a canonical joint is mimicked by more joints than this model carries rows for"));
-    }
-    impl->drives[coupled.source][count] =
-      Model::Impl::Drive{coupled.slot.velocity_index, coupled.multiplier};
-    ++count;
-  }
-
-  // D of robot_model §1. The description is its source
-  // (wiki/implementation/parameters.md §1), and §5 says those entries are the
-  // identified values on the actuated axes and the hand-tuned per-tool values on
-  // the two passive ones -- which is why reading them from the selected
-  // description gets the tool dependence right without a table here.
-  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
-    const ::urdf::JointConstSharedPtr joint = tree->getJoint(canonical[index]);
-    if (joint && joint->dynamics) {
-      impl->damping[static_cast<Eigen::Index>(index)] = joint->dynamics->damping;
-    }
-  }
-  // Except the telescope. parameters §5 calls its URDF damping a simulation
-  // stability hack an order of magnitude above the identified value and says it
-  // must not enter the model; no identified value is recorded anywhere in the
-  // vault, so the entry is zero rather than a guess. README says so.
-  impl->damping[3] = 0.0;
+  // What `parse` produced, carried into the implementation state. Everything
+  // below this point is what only a `Model` needs -- the passive range, the
+  // frame table and the collision geometry -- and the symbolic graph does not.
+  auto impl = std::make_unique<Impl>(std::move(source.model));
+  impl->tool = source.tool;
+  impl->names = joint_names(source.tool);
+  impl->areas = cylinder::axis_areas();
+  impl->joints = source.joints;
+  impl->coupled = std::move(source.coupled);
+  impl->drives = source.drives;
+  impl->drive_count = source.drive_count;
+  impl->damping = source.damping;
+  impl->mount = source.mount;
 
   // The passive range of robot_model §2.3, read out of the description rather
   // than written down: both machine descriptions bound the tip at +-pi/2 and the
@@ -1616,17 +1353,6 @@ Result<Model> Model::create(const ModelConfig& config)
     const bool present = impl->model.existFrame(kFrameLinks[index].link);
     impl->frame_present[index] = present;
     impl->frames[index] = present ? impl->model.getFrameId(kFrameLinks[index].link) : 0U;
-  }
-
-  // Where a payload attaches (robot_model §5): the joint that carries
-  // K8_rotator_lower_part, and the fixed placement of that link within it.
-  const std::size_t rotator_lower_part = static_cast<std::size_t>(Frame::RotatorLowerPart);
-  if (impl->frame_present[rotator_lower_part]) {
-    const pinocchio::Frame& frame = impl->model.frames[impl->frames[rotator_lower_part]];
-    impl->payload_joint = frame.parentJoint;
-    impl->payload_placement = frame.placement;
-    impl->bare_inertia = impl->model.inertias[impl->payload_joint];
-    impl->payload_attachable = true;
   }
 
   // The collision model. Building it is construction work, not query work
@@ -1999,16 +1725,51 @@ Result<QU> Model::passive_equilibrium(const QA& q_a, const Payload& payload) con
   return Result<QU>::success(std::move(q_equilibrium));
 }
 
-#define CRANE_MODEL_UNAVAILABLE(type, name) \
-  Result<type> Model::name \
-  { \
-    return Result<type>::failure( \
-      failure(ErrorCode::BackendUnavailable, "production model backend is unavailable")); \
+// Contract §9. The graph is the same equations as everything above it: the same
+// parsed description, the same projection P, the same damping and the same
+// payload, run through the same two Pinocchio algorithms over `casadi::SX`.
+// What comes back here is the backend-neutral handle the contract freezes;
+// `crane_model::symbolic::casadi_graph` of the `crane_model::casadi_graph`
+// target hands the CasADi functions themselves to a consumer that opts in.
+//
+// Building one is **not** a real-time operation (contract §10) -- it copies the
+// model, allocates an expression graph and evaluates it once. Nothing on the
+// 100 Hz path constructs one.
+Result<SymbolicGraph> Model::symbolic_graph(
+  const SymbolicGraphSpec& spec, const Payload& payload) const
+{
+  if (!impl_) {
+    return Result<SymbolicGraph>::failure(not_ready());
+  }
+  // The source the graph is built from is this model's own parse, not a second
+  // one: only the payload is written in, through the same `attach_payload` the
+  // numeric calls use, and into a copy, so nothing here disturbs a concurrent
+  // reader of the model itself.
+  detail::SymbolicSource source;
+  source.model = impl_->model;
+  source.neutral = impl_->neutral;
+  source.joints = impl_->joints;
+  source.coupled = impl_->coupled;
+  source.drives = impl_->drives;
+  source.drive_count = impl_->drive_count;
+  source.damping = impl_->damping;
+  source.mount = impl_->mount;
+  source.tool = impl_->tool;
+  Status status = detail::attach_payload(source.model, source.mount, payload);
+  if (!status.ok()) {
+    return Result<SymbolicGraph>::failure(std::move(status));
   }
 
-CRANE_MODEL_UNAVAILABLE(
-  SymbolicGraph, symbolic_graph(const SymbolicGraphSpec&, const Payload&) const)
-
-#undef CRANE_MODEL_UNAVAILABLE
+  auto graph = std::make_unique<SymbolicGraph::Impl>();
+  detail::GraphDimensions dimensions;
+  status = detail::build_graph(source, spec, graph->graph, dimensions);
+  if (!status.ok()) {
+    return Result<SymbolicGraph>::failure(std::move(status));
+  }
+  graph->state_dimension = dimensions.state;
+  graph->input_dimension = dimensions.input;
+  graph->has_output_map = dimensions.output_map;
+  return Result<SymbolicGraph>::success(SymbolicGraph(std::move(graph)));
+}
 
 }  // namespace crane_model

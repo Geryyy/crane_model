@@ -1075,24 +1075,36 @@ TEST(CraneModelHydraulicSubset, SevenThousandFortyJawUsesTheDeployedFourBarFit)
     7.854e-3 * transmission.value().cylinder_velocity[5], 1.0e-18);
 }
 
-TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnavailable)
+TEST(CraneModelHydraulicSubset, NoCallReportsBackendUnavailableAnyMore)
 {
-  // Both tools. Slice 4 arrives in pieces: forward kinematics, the Jacobian,
-  // collision, the rigid-body dynamics and now the passive equilibrium have a
-  // backend, the symbolic graph does not, and it says so rather than handing a
-  // consumer a stub.
+  // Both tools. Slice 4 arrived in pieces -- forward kinematics, the Jacobian,
+  // collision, the rigid-body dynamics, the passive equilibrium, and now the
+  // symbolic graph -- and the graph was the last of them. `BackendUnavailable`
+  // is therefore no longer an answer this library gives: whatever each call
+  // reports at a given argument, it does not report "no backend".
+  //
+  // `test_symbolic_graph` is what says the graph is the *same* equations. This
+  // only says it exists.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
     const auto model = production_model(tool);
     ASSERT_TRUE(model.ok());
     const auto payload = valid_payload();
     const auto unavailable = crane_model::ErrorCode::BackendUnavailable;
+    const auto q = valid_q();
 
-    EXPECT_EQ(model.value().symbolic_graph({}, payload).status().code, unavailable);
+    const auto graph = model.value().symbolic_graph({}, payload);
+    ASSERT_TRUE(graph.ok()) << graph.status().message;
+    EXPECT_EQ(graph.value().state_dimension(), crane_model::kStateDof);
+    EXPECT_EQ(graph.value().input_dimension(), crane_model::kInputDof);
+    EXPECT_TRUE(graph.value().has_output_map());
 
-    // And the equilibrium is no longer among them: whatever it answers at a given
-    // q_a, it does not answer "no backend".
     EXPECT_NE(model.value().passive_equilibrium(
       crane_model::QA::Zero(), payload).status().code, unavailable);
+    EXPECT_NE(model.value().cylinder_jacobian(q).status().code, unavailable);
+    EXPECT_NE(model.value().full_dynamics(
+      q, crane_model::DQ::Zero(), payload).status().code, unavailable);
+    EXPECT_NE(model.value().collision_query(
+      q, crane_model::CollisionScene{}).status().code, unavailable);
   }
 }
 
