@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Derive the recorded-trajectory parity fixture from the machine recordings.
+"""
+Derive the recorded-trajectory parity fixture from the machine recordings.
 
 Offline, run once by hand, never part of the build or of CI.  It is the
 counterpart of `scripts/derive_collision_model.py`: the expensive, unrepeatable
@@ -141,7 +142,8 @@ def farthest_point_selection(features, count):
 
 
 def prefix_of(package, workspace):
-    """Return the install prefix that carries `package`.
+    """
+    Return the install prefix that carries `package`.
 
     AMENT_PREFIX_PATH first, then the workspace's own install tree.  The
     fallback is not redundant: the retired packages are not in the CBS build
@@ -154,7 +156,9 @@ def prefix_of(package, workspace):
     fallback = workspace / "install" / package
     if (fallback / "share" / package).is_dir():
         return fallback
-    raise SystemExit(f"{package} is neither on AMENT_PREFIX_PATH nor built under {fallback}")
+    raise SystemExit(
+        f"{package} is neither on AMENT_PREFIX_PATH nor built under {fallback}"
+    )
 
 
 def build_reference(source, into, workspace):
@@ -278,7 +282,7 @@ def header(args, bags, q, dq, revision):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     parser.add_argument("--description", type=Path, required=True)
     parser.add_argument("--recordings", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -313,7 +317,9 @@ def main():
 
     scratch = tempfile.mkdtemp(prefix="crane_model_parity_")
     try:
-        binary = build_reference(here / "mp_crane_reference.cpp", Path(scratch), workspace)
+        binary = build_reference(
+            here / "mp_crane_reference.cpp", Path(scratch), workspace
+        )
         reference = evaluate(
             binary, args.description, Path(scratch, "answers.txt"), q, dq
         )
@@ -322,7 +328,9 @@ def main():
 
     expected = sum(count for name, count in COLUMNS if name.startswith("mp_"))
     if reference.shape != (len(q), expected):
-        raise SystemExit(f"the evaluator returned {reference.shape}, expected {(len(q), expected)}")
+        raise SystemExit(
+            f"the evaluator returned {reference.shape}, expected {(len(q), expected)}"
+        )
 
     bags = sorted(path for path in args.recordings.iterdir() if path.is_dir())
     lines = header(args, bags, q, dq, revision or "unknown")

@@ -43,9 +43,6 @@
 //                             the passive equilibrium, which is the gravity
 //                             part of the bias read through a different route.
 
-#include "epsilon_crane_parameter/parameter_def.hpp"
-#include "mp_crane/mp_crane_lib.h"
-
 #include <array>
 #include <cstdio>
 #include <fstream>
@@ -53,6 +50,9 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include "epsilon_crane_parameter/parameter_def.hpp"
+#include "mp_crane/mp_crane_lib.h"
 
 namespace
 {

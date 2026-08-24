@@ -142,6 +142,19 @@ if(BUILD_TESTING)
     PRIVATE
       CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description")
 
+  # The recorded-trajectory parity comparison of PRD user story 65. It links
+  # the public library and nothing else: the generated model reaches it only
+  # through `test/recorded_parity_fixture.txt`, a checked-in table of numbers,
+  # so no target here names `mp_crane` and the comparison needs neither a bag
+  # nor ROS.
+  ament_add_gtest(test_recorded_parity
+    test/test_recorded_parity.cpp)
+  target_link_libraries(test_recorded_parity ${PROJECT_NAME})
+  target_compile_definitions(test_recorded_parity
+    PRIVATE
+      CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description"
+      CRANE_MODEL_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
+
   add_executable(test_consumer_w04 test/consumer_w04.cpp)
   add_executable(test_consumer_w05 test/consumer_w05.cpp)
   add_executable(test_consumer_w06 test/consumer_w06.cpp)

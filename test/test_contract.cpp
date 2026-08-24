@@ -3232,3 +3232,107 @@ TEST(CraneModelCollision, CollisionQueriesIsNotARealTimeCall)
   EXPECT_TRUE(ok);
   EXPECT_GT(g_allocation_count.load(std::memory_order_relaxed), 0U);
 }
+
+// --- the whole slice-4 surface, from one model --------------------------------
+
+TEST(CraneModelContract, TheWholeSurfaceAnswersFromOneModel)
+{
+  // Contract §11 lists the fixtures a slice owes one call at a time. Slice 4 is
+  // the first point at which every one of them has a production backend, so it
+  // owes one more: all of them from a single `Model`, in one sequence, on one
+  // configuration, with each answer used by the next. Nine calls that each pass
+  // alone still leave open whether the object they share is one model -- whether
+  // the pose the Jacobian differentiates is the pose kinematics returned, and
+  // whether the mass matrix the reduction eliminates is the one the dynamics
+  // built. That is what this asserts, and it is the whole of the slice.
+  const auto made = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(made.ok()) << made.status().message;
+  const crane_model::Model& model = made.value();
+  EXPECT_EQ(model.tool(), crane_model::Tool::Pzs100);
+  EXPECT_TRUE(model.ready());
+
+  // Where the tool hangs for a reaching pose, and the configuration that makes.
+  const crane_model::QA q_a = actuated_rows(reaching_configuration());
+  const auto hanging = model.passive_equilibrium(q_a, block_payload());
+  ASSERT_TRUE(hanging.ok()) << hanging.status().message;
+  const crane_model::Q q = settled_configuration(q_a, hanging.value());
+
+  // Forward kinematics, and the Jacobian as its derivative in the one column
+  // the passive pair contributes -- the tip coordinate has to move the tool, or
+  // the equilibrium above was solved on a chain the Jacobian does not see.
+  const auto pose = model.forward_kinematics(
+    q, crane_model::Frame::MountingBase, crane_model::Frame::Tcp);
+  ASSERT_TRUE(pose.ok()) << pose.status().message;
+  EXPECT_EQ(pose.value().expressed_in, crane_model::Frame::MountingBase);
+  const auto jacobian = model.jacobian(q, crane_model::Frame::Tcp);
+  ASSERT_TRUE(jacobian.ok()) << jacobian.status().message;
+  EXPECT_EQ(jacobian.value().expressed_in, crane_model::Frame::Tcp);
+
+  const double step = 1.0e-6;
+  crane_model::Q nudged = q;
+  nudged[kPassiveRows[0]] += step;
+  const auto moved = model.forward_kinematics(
+    nudged, crane_model::Frame::MountingBase, crane_model::Frame::Tcp);
+  ASSERT_TRUE(moved.ok()) << moved.status().message;
+  const Eigen::Vector3d difference =
+    (moved.value().position_m - pose.value().position_m) / step;
+  const Eigen::Vector3d predicted =
+    pose.value().orientation * jacobian.value().value.block<3, 1>(0, kPassiveRows[0]);
+  EXPECT_GT(predicted.norm(), 0.1) << "the tip column is zero, so the check below is 0 == 0";
+  EXPECT_LT((difference - predicted).norm(), 1.0e-4)
+    << "the Jacobian is not the derivative of this model's own kinematics";
+
+  // The three dynamics calls, tied to each other rather than each to itself.
+  const crane_model::DQ dq = loaded_velocity();
+  crane_model::Input ddq_a = crane_model::Input::Zero();
+  ddq_a << 0.05, -0.02, 0.03, 0.01, -0.04, 0.0;
+
+  const auto full = model.full_dynamics(q, dq, block_payload());
+  ASSERT_TRUE(full.ok()) << full.status().message;
+  const Eigen::SelfAdjointEigenSolver<crane_model::FullMass> spectrum(full.value().mass);
+  ASSERT_EQ(spectrum.info(), Eigen::Success);
+  EXPECT_GT(spectrum.eigenvalues().minCoeff(), 0.0) << "M is not positive definite";
+  EXPECT_LT(passive_rows(full.value().inverse_dynamics_tau).norm(), 1.0e-6)
+    << "the consistent torque left a passive row";
+
+  crane_model::QU ddq_u = crane_model::QU::Zero();
+  const crane_model::Vector6 tau_a =
+    consistent_actuated_torque(model, q, dq, ddq_a, block_payload(), &ddq_u);
+  EXPECT_GT(tau_a.norm(), 1.0) << "a 220 kg payload on an extended crane weighs nothing here";
+  const auto reduced = model.reduced_actuated_dynamics(q, dq, ddq_a, block_payload());
+  ASSERT_TRUE(reduced.ok()) << reduced.status().message;
+  const crane_model::Vector6 predicted_tau =
+    reduced.value().mass_eff * ddq_a + reduced.value().bias_eff;
+  EXPECT_LT((predicted_tau - tau_a).norm(), 1.0e-6 * std::max(1.0, tau_a.norm()))
+    << "the reduction is not the reduction of this model's own full dynamics";
+
+  const auto torque = model.inverse_dynamics(
+    q, dq, full_acceleration(ddq_a, ddq_u), block_payload());
+  ASSERT_TRUE(torque.ok()) << torque.status().message;
+  EXPECT_LT((actuated_rows(torque.value()) - tau_a).norm(), 1.0e-9);
+
+  // Collision, against the same configuration, with the obstacle placed from
+  // the pose the kinematics above returned rather than from a written-down
+  // number the description could move underneath.
+  crane_model::CollisionScene scene;
+  scene.primitives.push_back(
+    box_primitive(
+      "post", tool_position(model, q) + Eigen::Vector3d(0.0, 1.5, 0.0),
+      Eigen::Vector3d(0.4, 0.4, 3.0)));
+  const auto nearest = model.collision_query(q, scene);
+  ASSERT_TRUE(nearest.ok()) << nearest.status().message;
+  EXPECT_TRUE(std::isfinite(nearest.value().minimum_distance_m));
+  const auto every = model.collision_queries(q, scene);
+  ASSERT_TRUE(every.ok()) << every.status().message;
+  EXPECT_FALSE(every.value().empty());
+  EXPECT_LE(
+    nearest.value().minimum_distance_m,
+    scene_entry(every.value(), "post").minimum_distance_m);
+
+  // And the symbolic graph, off the same model and the same payload.
+  const auto graph = model.symbolic_graph({}, block_payload());
+  ASSERT_TRUE(graph.ok()) << graph.status().message;
+  EXPECT_EQ(graph.value().state_dimension(), crane_model::kStateDof);
+  EXPECT_EQ(graph.value().input_dimension(), crane_model::kInputDof);
+  EXPECT_TRUE(graph.value().has_output_map());
+}

@@ -550,6 +550,43 @@ torque algorithm being asked, and the reduction of §3.4 is recovered from
 fails, the disagreement is with the description, not with a transcription of the
 same algebra.
 
+### Parity with the generated model
+
+`test/test_recorded_parity.cpp` compares this backend against the Maple/MATLAB
+model of `src/matlab_codegen/mp_crane` at 64 configurations taken out of the
+2026-08-19 machine recordings. It is PRD user story 65's evidence for retiring
+that model, and the full write-up — the residuals, the two defects it found and
+what the result licenses — is `wiki/robot_model.md` §6.
+
+The fixture is `test/recorded_parity_fixture.txt`: the 64 configurations, and
+the generated model's answers beside them, with the bag and topic of every
+column in its header. `test/derive_recorded_parity.py` produced it once, by
+hand, and `test/mp_crane_reference.cpp` is the evaluator that script compiles
+and runs. **Neither is part of the build**: nothing in `CMakeLists.txt` or
+`package.xml` names `mp_crane`, and the test links only `crane_model`. That is
+deliberate — the generated model reaches this directory as a checked-in table of
+numbers and by no other route, which is what lets the slice-4 retirement guard
+assert its absence from the `hardware` closure while the validation against it
+survives. Regenerating the fixture needs the recordings mounted and the retained
+stack built, and is not something CI can or should do:
+
+```bash
+python3 test/derive_recorded_parity.py \
+  --description test/description/pzs100.urdf \
+  --recordings /home/vscode/Documents/control_recordings \
+  --output test/recorded_parity_fixture.txt
+```
+
+The comparison is a ladder, not a tolerance. Forward kinematics and the passive
+equilibrium agree to machine precision. The passive rows of `M` and the bias do
+not, by 50 % — and the test evaluates this model three times, on the description
+as checked in, on the description without the 200 kg rail gripper the generated
+model does not carry, and on that with the tool frame moved down by the 48.7 mm
+the generated model drops, where the two agree to 1e-4. Each rung names one
+defect in the retired model; nothing is rounded away, and a change that made
+this model agree with the generated one on the description as written fails the
+first test in the file.
+
 Build this package in the integration workspace so Eigen and retained
 dependencies are available:
 
