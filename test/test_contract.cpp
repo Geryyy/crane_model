@@ -1,11 +1,23 @@
 #include <gtest/gtest.h>
 
 #include <limits>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <new>
+#include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include <pinocchio/multibody/data.hpp>
+#include <pinocchio/multibody/model.hpp>
+#include <pinocchio/parsers/urdf.hpp>
+#include <pinocchio/algorithm/frames.hpp>
+#include <pinocchio/algorithm/joint-configuration.hpp>
+#include <pinocchio/algorithm/kinematics.hpp>
 
 #include "crane_model/model.hpp"
 #include "crane_model/testing/mock_model.hpp"
@@ -84,13 +96,61 @@ crane_model::Q valid_q()
   return q;
 }
 
-std::string description_for(crane_model::Tool tool)
+// The real machine description, expanded from the xacro of
+// src/epsilon_crane_description and checked in beside this file. It is the
+// whole point of the slice-4 tracer: the model is built from this, not from a
+// string that merely mentions the joint names.
+std::string read_description(const char * file)
 {
-  const std::string common = "<robot name=\"fixture\"> "
-    "theta1_slewing_joint theta2_boom_joint theta3_arm_joint "
-    "q4_big_telescope theta6_tip_joint theta7_tilt_joint theta8_rotator_joint ";
-  return common + (tool == crane_model::Tool::Pzs100 ? "q9_left_rail_joint" :
-                                                        "theta10_outer_jaw_joint") + " </robot>";
+  const std::string path = std::string(CRANE_MODEL_TEST_DESCRIPTION_DIR) + "/" + file;
+  std::ifstream stream(path);
+  EXPECT_TRUE(stream.is_open()) << "cannot read " << path;
+  std::ostringstream buffer;
+  buffer << stream.rdbuf();
+  return buffer.str();
+}
+
+const std::string& description_for(crane_model::Tool tool)
+{
+  static const std::string rail = read_description("pzs100.urdf");
+  static const std::string jaws = read_description("epsilon_7040.urdf");
+  return tool == crane_model::Tool::Pzs100 ? rail : jaws;
+}
+
+// A description that parses but carries none of the canonical joints, so the
+// joint map fails on its own terms rather than on the parser's.
+const char * const kJointlessDescription =
+  "<robot name=\"fixture\"><link name=\"K0_mounting_base\"/></robot>";
+
+// Every Frame the contract defines, in enum order.
+const std::array<crane_model::Frame, 12> kAllFrames{{
+  crane_model::Frame::World,
+  crane_model::Frame::MountingBase,
+  crane_model::Frame::SlewingColumn,
+  crane_model::Frame::Boom,
+  crane_model::Frame::Arm,
+  crane_model::Frame::BigTelescope,
+  crane_model::Frame::Tip,
+  crane_model::Frame::Tilt,
+  crane_model::Frame::Rotator,
+  crane_model::Frame::RotatorLowerPart,
+  crane_model::Frame::Tcp,
+  crane_model::Frame::ToolContact,
+}};
+
+Eigen::Isometry3d isometry(const crane_model::Pose& pose)
+{
+  Eigen::Isometry3d transform = Eigen::Isometry3d::Identity();
+  transform.linear() = pose.orientation.toRotationMatrix();
+  transform.translation() = pose.position_m;
+  return transform;
+}
+
+// The rotation vector of a rotation matrix, i.e. log(R) read as axis * angle.
+Eigen::Vector3d rotation_vector(const Eigen::Matrix3d& rotation)
+{
+  const Eigen::AngleAxisd angle_axis(rotation);
+  return angle_axis.angle() * angle_axis.axis();
 }
 
 crane_model::Result<crane_model::Model> production_model(crane_model::Tool tool)
@@ -147,16 +207,27 @@ Eigen::Vector2d rotate(double angle, double x, double y)
   return Eigen::Vector2d(cosine * x - sine * y, sine * x + cosine * y);
 }
 
-Eigen::Vector2d boom_attachment(double q2)
+// The three placements of the boom four-bar. Their defaults are §6.2's numbers;
+// the linkage cross-check below builds the same struct out of the placements
+// Pinocchio reads from the real description instead, which is how a description
+// that disagrees with the compiled-in geometry is caught.
+struct BoomGeometry
 {
-  return rotate(q2, 3.49288 - 3.039, -0.036034);  // R(q2) (a_2 + p_S2x, p_S2y)
+  Eigen::Vector2d foot{0.433, -1.7682};              // p_S0
+  Eigen::Vector2d pivot{-0.12, -0.07};               // p_S1
+  Eigen::Vector2d link{3.49288 - 3.039, -0.036034};  // a_2 + p_S2x, p_S2y
+};
+
+Eigen::Vector2d boom_attachment(const BoomGeometry& geometry, double q2)
+{
+  return rotate(q2, geometry.link.x(), geometry.link.y());  // R(q2) (a_2 + p_S2x, p_S2y)
 }
 
-double boom_stroke(double q2)
+double boom_stroke_from(const BoomGeometry& geometry, double q2)
 {
-  const Eigen::Vector2d p_s0(0.433, -1.7682);
-  const Eigen::Vector2d p_s1(-0.12, -0.07);
-  const Eigen::Vector2d d_pivot = boom_attachment(q2) - p_s1;
+  const Eigen::Vector2d p_s0 = geometry.foot;
+  const Eigen::Vector2d p_s1 = geometry.pivot;
+  const Eigen::Vector2d d_pivot = boom_attachment(geometry, q2) - p_s1;
   const double d_squared = d_pivot.squaredNorm();
   const double sum = kDrawbarLength + kPushbarLength;
   const double difference = kDrawbarLength - kPushbarLength;
@@ -171,20 +242,37 @@ double boom_stroke(double q2)
   return (p_j - p_s0).norm();
 }
 
+double boom_stroke(double q2)
+{
+  return boom_stroke_from(BoomGeometry{}, q2);
+}
+
 // The same cylinder foot and the same boom-side attachment, but with the
 // drawbar and pushbar deleted: what the stroke would be if the boom cylinder
 // acted directly on the boom instead of through the four-bar coupler point.
 double boom_direct_stroke(double q2)
 {
-  return (boom_attachment(q2) - Eigen::Vector2d(0.433, -1.7682)).norm();
+  const BoomGeometry geometry;
+  return (boom_attachment(geometry, q2) - geometry.foot).norm();
+}
+
+struct ArmGeometry
+{
+  Eigen::Vector2d foot{-1.6802, -0.0485};             // p_S3x, p_S3y
+  Eigen::Vector2d link{-0.3925 + 0.274489, -0.468};   // a_3 + p_S4x, -p_S4z
+  double lateral{0.224 - 0.224};                      // p_S4y - p_S3z
+};
+
+double arm_stroke_from(const ArmGeometry& geometry, double q3)
+{
+  const Eigen::Vector2d moving = rotate(q3, geometry.link.x(), geometry.link.y());
+  const Eigen::Vector2d in_plane = moving - geometry.foot;
+  return std::sqrt(in_plane.squaredNorm() + geometry.lateral * geometry.lateral);
 }
 
 double arm_stroke(double q3)
 {
-  const Eigen::Vector2d moving = rotate(q3, -0.3925 + 0.274489, -0.468);
-  const Eigen::Vector2d in_plane = moving - Eigen::Vector2d(-1.6802, -0.0485);
-  const double lateral = 0.224 - 0.224;  // p_S4y - p_S3z
-  return std::sqrt(in_plane.squaredNorm() + lateral * lateral);
+  return arm_stroke_from(ArmGeometry{}, q3);
 }
 
 // wiki/hydraulics.md §2.6 for the 7040, with the numbers ported from the
@@ -200,15 +288,31 @@ double jaw_mirror_angle(double q8)
   return (-0.121220 * q8 + 1.400122) * q8 - 0.227867;  // Horner, jaw_linkage_p
 }
 
-double jaw_stroke(double q8)
+struct JawGeometry
 {
-  const Eigen::Vector2d outer = rotate(q8, 0.8126 - 0.8971, 0.01754);  // a_10 + p_S7x, p_S7y
-  const Eigen::Vector2d inner =
-    rotate(jaw_mirror_angle(q8), 0.8172 - 0.908397, 0.015289);  // a_12 + p_S8x, p_S8y
-  const double ground = 0.328 + 0.336;  // a_9 + a_11
+  double outer_pivot{0.328};                       // a_9
+  double outer_arm{0.8126};                        // a_10
+  double inner_pivot{0.336};                       // a_11
+  double inner_arm{0.8172};                        // a_12
+  Eigen::Vector2d outer_pin{-0.8971, 0.01754};     // p_S7
+  Eigen::Vector2d inner_pin{-0.908397, 0.015289};  // p_S8
+};
+
+double jaw_stroke_from(const JawGeometry& geometry, double q8)
+{
+  const Eigen::Vector2d outer = rotate(
+    q8, geometry.outer_arm + geometry.outer_pin.x(), geometry.outer_pin.y());
+  const Eigen::Vector2d inner = rotate(
+    jaw_mirror_angle(q8), geometry.inner_arm + geometry.inner_pin.x(), geometry.inner_pin.y());
+  const double ground = geometry.outer_pivot + geometry.inner_pivot;  // a_9 + a_11
   // The outer jaw's arm is mirrored against the inner jaw's, so the two arm
   // x components add rather than subtract.
   return std::hypot(inner.x() + outer.x() + ground, inner.y() - outer.y());
+}
+
+double jaw_stroke(double q8)
+{
+  return jaw_stroke_from(JawGeometry{}, q8);
 }
 
 // The same two attachment points, but with the inner jaw frozen at the mirror
@@ -220,12 +324,61 @@ double jaw_stroke_with_frozen_inner_jaw(double q8)
   return std::hypot(inner.x() + outer.x() + 0.328 + 0.336, inner.y() - outer.y());
 }
 
-double transmission_ratio(double (* stroke)(double), double q)
+template<typename Stroke>
+double transmission_ratio(Stroke stroke, double q)
 {
   return (stroke(q + kStep) - stroke(q - kStep)) / (2.0 * kStep);
 }
 
 }  // namespace reference
+
+// The same linkage, but with every length that the description actually carries
+// read back out of it with Pinocchio instead of written down. What is left over
+// is exactly the geometry the description does not carry -- the two boom bar
+// lengths, the arm cylinder's rod-end attachment, the 7040's inner-jaw cylinder
+// pin and its fitted mirror law -- and each of those is named where it is used.
+namespace parsed
+{
+
+class Description
+{
+public:
+  explicit Description(crane_model::Tool tool)
+  : model_(build(tool)), data_(model_)
+  {
+    pinocchio::forwardKinematics(model_, data_, pinocchio::neutral(model_));
+    pinocchio::updateFramePlacements(model_, data_);
+  }
+
+  // Translation of `child` relative to `parent` at the zero configuration.
+  // Every pair below shares a parent joint, so the value is the fixed placement
+  // the description declares and not a function of the configuration.
+  Eigen::Vector3d offset(const std::string& parent, const std::string& child) const
+  {
+    EXPECT_TRUE(model_.existFrame(parent)) << "no frame " << parent;
+    EXPECT_TRUE(model_.existFrame(child)) << "no frame " << child;
+    return data_.oMf[model_.getFrameId(parent)]
+           .actInv(data_.oMf[model_.getFrameId(child)]).translation();
+  }
+
+  Eigen::Vector2d planar(const std::string& parent, const std::string& child) const
+  {
+    return offset(parent, child).head<2>();
+  }
+
+private:
+  static pinocchio::Model build(crane_model::Tool tool)
+  {
+    pinocchio::Model model;
+    pinocchio::urdf::buildModelFromXML(description_for(tool), model);
+    return model;
+  }
+
+  pinocchio::Model model_;
+  pinocchio::Data data_;
+};
+
+}  // namespace parsed
 
 }  // namespace
 
@@ -285,9 +438,18 @@ TEST(CraneModelContract, RobotDescriptionAndToolValidationIsExplicit)
   EXPECT_EQ(result.status().code, crane_model::ErrorCode::InvalidRobotDescription);
 
   auto missing_joint = crane_model::ModelConfig{};
-  missing_joint.robot_description_xml = "<robot name=\"fixture\"></robot>";
+  missing_joint.robot_description_xml = kJointlessDescription;
   result = crane_model::Model::create(missing_joint);
   EXPECT_EQ(result.status().code, crane_model::ErrorCode::MissingJoint);
+
+  // The tool half of the joint map is checked against the description too: the
+  // rail description does not carry the 7040's jaw joint (contract §2).
+  auto wrong_tool = crane_model::ModelConfig{};
+  wrong_tool.robot_description_xml = description_for(crane_model::Tool::Pzs100);
+  wrong_tool.tool = crane_model::Tool::Epsilon7040;
+  result = crane_model::Model::create(wrong_tool);
+  EXPECT_EQ(result.status().code, crane_model::ErrorCode::MissingJoint);
+  EXPECT_NE(result.status().message.find("theta10_outer_jaw_joint"), std::string::npos);
 
   auto invalid_tool = crane_model::ModelConfig{};
   invalid_tool.robot_description_xml = description_for(crane_model::Tool::Pzs100);
@@ -902,7 +1064,10 @@ TEST(CraneModelHydraulicSubset, SevenThousandFortyJawUsesTheDeployedFourBarFit)
 
 TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnavailable)
 {
-  // Both tools: the 7040's tool axis joined the subset, everything else did not.
+  // Both tools. Slice 4 arrives in pieces: forward kinematics and the Jacobian
+  // have a backend now, the dynamics, passive equilibrium, collision and
+  // symbolic graph do not, and each of them says so call by call rather than
+  // handing a consumer a stub.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
     const auto model = production_model(tool);
     ASSERT_TRUE(model.ok());
@@ -912,9 +1077,6 @@ TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnav
     const auto scene = crane_model::CollisionScene{};
     const auto unavailable = crane_model::ErrorCode::BackendUnavailable;
 
-    EXPECT_EQ(model.value().forward_kinematics(
-      q, crane_model::Frame::MountingBase, crane_model::Frame::Tcp).status().code, unavailable);
-    EXPECT_EQ(model.value().jacobian(q, crane_model::Frame::Tcp).status().code, unavailable);
     EXPECT_EQ(model.value().passive_equilibrium(
       crane_model::QA::Zero(), payload).status().code, unavailable);
     EXPECT_EQ(model.value().full_dynamics(q, dq, payload).status().code, unavailable);
@@ -927,9 +1089,13 @@ TEST(CraneModelHydraulicSubset, EveryCallOutsideTheSubsetStillReportsBackendUnav
   }
 }
 
-TEST(CraneModelHydraulicSubset, SubsetCallsAllocateNothingAfterConstruction)
+TEST(CraneModelHydraulicSubset, RealTimeCallsAllocateNothingAfterConstruction)
 {
-  // Both tools, because the 7040's jaw four-bar is on the same RT path.
+  // Both tools, because the 7040's jaw four-bar is on the same RT path, and now
+  // also forward kinematics and the Jacobian: contract §10 says a call that
+  // cannot be shown allocation-free is not an RT API call, and both of these
+  // are on the control path. The Pinocchio model and its Data workspace are
+  // built once, in create(), which is not real-time.
   for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
     const auto model = production_model(tool);
     ASSERT_TRUE(model.ok());
@@ -938,11 +1104,14 @@ TEST(CraneModelHydraulicSubset, SubsetCallsAllocateNothingAfterConstruction)
     const auto pressure = zero_pressure();
     crane_model::DQA dq_a;
     dq_a << 0.3, 0.1, -0.1, 0.02, 0.4, 0.01;
-    // Warm every code path before observing allocations; the model itself is
-    // built once, in create(), which is not real-time.
+    const auto base = crane_model::Frame::MountingBase;
+    const auto tcp = crane_model::Frame::Tcp;
+    // Warm every code path before observing allocations.
     ASSERT_TRUE(model.value().cylinder_jacobian(q).ok());
     ASSERT_TRUE(model.value().transmission(q, dq_a, pressure).ok());
     ASSERT_TRUE(model.value().cylinder_force(pressure).ok());
+    ASSERT_TRUE(model.value().forward_kinematics(q, base, tcp).ok());
+    ASSERT_TRUE(model.value().jacobian(q, tcp).ok());
 
     g_allocation_count.store(0, std::memory_order_relaxed);
     g_allocation_guard.store(true, std::memory_order_relaxed);
@@ -951,9 +1120,414 @@ TEST(CraneModelHydraulicSubset, SubsetCallsAllocateNothingAfterConstruction)
       all_ok = all_ok && model.value().cylinder_jacobian(q).ok();
       all_ok = all_ok && model.value().transmission(q, dq_a, pressure).ok();
       all_ok = all_ok && model.value().cylinder_force(pressure).ok();
+      all_ok = all_ok && model.value().forward_kinematics(q, base, tcp).ok();
+      all_ok = all_ok && model.value().jacobian(q, tcp).ok();
     }
     g_allocation_guard.store(false, std::memory_order_relaxed);
     EXPECT_TRUE(all_ok);
     EXPECT_EQ(g_allocation_count.load(std::memory_order_relaxed), 0U);
+  }
+}
+
+// --- the rigid-body description ---------------------------------------------
+//
+// Slice 4's tracer bullet: one call end to end through Pinocchio -- the real
+// description in, a parsed model, a pose out.
+
+TEST(CraneModelDescription, JointMapComesFromTheRealDescriptionForBothTools)
+{
+  const auto rail = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(rail.ok()) << rail.status().message;
+  const auto jaws = production_model(crane_model::Tool::Epsilon7040);
+  ASSERT_TRUE(jaws.ok()) << jaws.status().message;
+
+  // The canonical order of contract §2, spelled as ROS 2 Interfaces §3.1
+  // spells it, which is the legacy URDF spelling and not the q_i symbols.
+  const std::array<const char *, 7> shared{{
+    "theta1_slewing_joint", "theta2_boom_joint", "theta3_arm_joint", "q4_big_telescope",
+    "theta6_tip_joint", "theta7_tilt_joint", "theta8_rotator_joint"}};
+  for (std::size_t index = 0; index < shared.size(); ++index) {
+    EXPECT_EQ(rail.value().urdf_joint_names()[index], shared[index]);
+    EXPECT_EQ(jaws.value().urdf_joint_names()[index], shared[index]);
+  }
+  EXPECT_EQ(rail.value().urdf_joint_names()[7], "q9_left_rail_joint");
+  EXPECT_EQ(jaws.value().urdf_joint_names()[7], "theta10_outer_jaw_joint");
+}
+
+TEST(CraneModelDescription, ForwardKinematicsAnswersForEveryFramePair)
+{
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok());
+    const auto q = valid_q();
+
+    for (const auto from : kAllFrames) {
+      for (const auto to : kAllFrames) {
+        const auto pose = model.value().forward_kinematics(q, from, to);
+        if (!pose.ok()) {
+          // The only permitted refusal is a frame this description does not
+          // carry. It is never a wrong pose and never a stub.
+          EXPECT_EQ(pose.status().code, crane_model::ErrorCode::FrameUnavailable)
+            << static_cast<int>(from) << " -> " << static_cast<int>(to);
+          continue;
+        }
+        EXPECT_EQ(pose.value().expressed_in, from);
+        EXPECT_TRUE(pose.value().position_m.allFinite());
+        EXPECT_NEAR(pose.value().orientation.norm(), 1.0, 1.0e-12);
+        if (from == to) {
+          EXPECT_LT(pose.value().position_m.norm(), 1.0e-15);
+          EXPECT_LT(rotation_vector(isometry(pose.value()).linear()).norm(), 1.0e-15);
+        }
+      }
+    }
+
+    // Chained through a third frame, and inverted: both are properties of a
+    // real transform tree and neither holds for a fixture.
+    const auto base_to_tip = model.value().forward_kinematics(
+      q, crane_model::Frame::MountingBase, crane_model::Frame::Tip);
+    const auto tip_to_tcp = model.value().forward_kinematics(
+      q, crane_model::Frame::Tip, crane_model::Frame::Tcp);
+    const auto base_to_tcp = model.value().forward_kinematics(
+      q, crane_model::Frame::MountingBase, crane_model::Frame::Tcp);
+    const auto tcp_to_base = model.value().forward_kinematics(
+      q, crane_model::Frame::Tcp, crane_model::Frame::MountingBase);
+    ASSERT_TRUE(base_to_tip.ok());
+    ASSERT_TRUE(tip_to_tcp.ok());
+    ASSERT_TRUE(base_to_tcp.ok());
+    ASSERT_TRUE(tcp_to_base.ok());
+    const Eigen::Isometry3d chained = isometry(base_to_tip.value()) * isometry(tip_to_tcp.value());
+    EXPECT_TRUE(chained.isApprox(isometry(base_to_tcp.value()), 1.0e-12));
+    EXPECT_TRUE(
+      isometry(tcp_to_base.value()).isApprox(isometry(base_to_tcp.value()).inverse(), 1.0e-12));
+  }
+}
+
+TEST(CraneModelDescription, FramesTheDescriptionDoesNotCarryAreRefusedNotFaked)
+{
+  const auto rail = production_model(crane_model::Tool::Pzs100);
+  const auto jaws = production_model(crane_model::Tool::Epsilon7040);
+  ASSERT_TRUE(rail.ok());
+  ASSERT_TRUE(jaws.ok());
+  const auto q = valid_q();
+  const auto base = crane_model::Frame::MountingBase;
+
+  // `world` is the world-model boundary of contract §8 and no crane description
+  // carries it, so both tools refuse it in either direction.
+  for (const auto * model : {&rail.value(), &jaws.value()}) {
+    EXPECT_EQ(
+      model->forward_kinematics(q, base, crane_model::Frame::World).status().code,
+      crane_model::ErrorCode::FrameUnavailable);
+    EXPECT_EQ(
+      model->forward_kinematics(q, crane_model::Frame::World, base).status().code,
+      crane_model::ErrorCode::FrameUnavailable);
+    EXPECT_EQ(
+      model->jacobian(q, crane_model::Frame::World).status().code,
+      crane_model::ErrorCode::FrameUnavailable);
+  }
+
+  // `tool_contact_point` is a 7040 link only. Same enum value, same call, two
+  // different and both correct answers.
+  EXPECT_EQ(
+    rail.value().forward_kinematics(q, base, crane_model::Frame::ToolContact).status().code,
+    crane_model::ErrorCode::FrameUnavailable);
+  const auto contact =
+    jaws.value().forward_kinematics(q, base, crane_model::Frame::ToolContact);
+  ASSERT_TRUE(contact.ok());
+  const auto tcp = jaws.value().forward_kinematics(q, base, crane_model::Frame::Tcp);
+  ASSERT_TRUE(tcp.ok());
+  EXPECT_GT((contact.value().position_m - tcp.value().position_m).norm(), 0.01);
+
+  // A value that is not a Frame is an argument error, not a frame lookup.
+  EXPECT_EQ(
+    rail.value().forward_kinematics(q, base, static_cast<crane_model::Frame>(200)).status().code,
+    crane_model::ErrorCode::InvalidArgument);
+  auto non_finite = q;
+  non_finite[5] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(
+    rail.value().forward_kinematics(non_finite, base, crane_model::Frame::Tcp).status().code,
+    crane_model::ErrorCode::NonFiniteInput);
+  EXPECT_EQ(
+    rail.value().jacobian(non_finite, crane_model::Frame::Tcp).status().code,
+    crane_model::ErrorCode::NonFiniteInput);
+}
+
+TEST(CraneModelDescription, EveryCoordinateMovesTheToolIncludingTheTelescopeTwice)
+{
+  const auto model = production_model(crane_model::Tool::Epsilon7040);
+  ASSERT_TRUE(model.ok());
+  const auto base = crane_model::Frame::MountingBase;
+  const auto tcp = crane_model::Frame::Tcp;
+  const auto reference = model.value().forward_kinematics(crane_model::Q::Zero(), base, tcp);
+  ASSERT_TRUE(reference.ok());
+
+  for (Eigen::Index index = 0; index < 8; ++index) {
+    crane_model::Q q = crane_model::Q::Zero();
+    q[index] = 0.2;
+    const auto moved = model.value().forward_kinematics(q, base, tcp);
+    ASSERT_TRUE(moved.ok()) << "coordinate " << index;
+    const Eigen::Isometry3d delta =
+      isometry(reference.value()).inverse() * isometry(moved.value());
+    const double motion =
+      delta.translation().norm() + rotation_vector(delta.linear()).norm();
+    // q8 is the gripper, which does not move the tool centre point; the other
+    // seven all do, the two passive ones (indices 4 and 5) included.
+    if (index == 7) {
+      EXPECT_LT(motion, 1.0e-15) << "coordinate " << index;
+    } else {
+      EXPECT_GT(motion, 1.0e-3) << "coordinate " << index;
+    }
+  }
+
+  // robot_model §0: both telescope stages advance by the same q4, because the
+  // description mimics `q5_small_telescope` onto `q4_big_telescope`. The tool
+  // therefore travels twice the commanded extension, which is the doubling of
+  // hydraulics §2.4 and is a property of the description, not a constant here.
+  crane_model::Q extended = crane_model::Q::Zero();
+  extended[3] = 0.4;
+  const auto out = model.value().forward_kinematics(extended, base, tcp);
+  ASSERT_TRUE(out.ok());
+  EXPECT_NEAR(
+    (out.value().position_m - reference.value().position_m).norm(), 2.0 * 0.4, 1.0e-12);
+}
+
+TEST(CraneModelDescription, JacobianIsTheDerivativeOfTheForwardKinematics)
+{
+  const double step = 1.0e-6;
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok());
+    const auto q = valid_q();
+
+    for (const auto frame : {crane_model::Frame::Tcp, crane_model::Frame::Boom,
+        crane_model::Frame::Tip})
+    {
+      const auto jacobian = model.value().jacobian(q, frame);
+      ASSERT_TRUE(jacobian.ok());
+      EXPECT_EQ(jacobian.value().expressed_in, frame);
+      EXPECT_EQ(jacobian.value().value.rows(), 6);
+      EXPECT_EQ(jacobian.value().value.cols(), 8);
+
+      const auto centre = model.value().forward_kinematics(
+        q, crane_model::Frame::MountingBase, frame);
+      ASSERT_TRUE(centre.ok());
+      const Eigen::Isometry3d origin = isometry(centre.value());
+
+      for (Eigen::Index index = 0; index < 8; ++index) {
+        crane_model::Q forward = q;
+        crane_model::Q backward = q;
+        forward[index] += step;
+        backward[index] -= step;
+        const auto ahead = model.value().forward_kinematics(
+          forward, crane_model::Frame::MountingBase, frame);
+        const auto behind = model.value().forward_kinematics(
+          backward, crane_model::Frame::MountingBase, frame);
+        ASSERT_TRUE(ahead.ok());
+        ASSERT_TRUE(behind.ok());
+        const Eigen::Isometry3d plus = origin.inverse() * isometry(ahead.value());
+        const Eigen::Isometry3d minus = origin.inverse() * isometry(behind.value());
+        Eigen::Matrix<double, 6, 1> difference;
+        difference.head<3>() = (plus.translation() - minus.translation()) / (2.0 * step);
+        difference.tail<3>() =
+          (rotation_vector(plus.linear()) - rotation_vector(minus.linear())) / (2.0 * step);
+        EXPECT_LT(
+          (difference - jacobian.value().value.col(index)).norm(), 1.0e-6)
+          << "tool " << static_cast<int>(tool) << " frame " << static_cast<int>(frame)
+          << " column " << index;
+      }
+    }
+  }
+}
+
+TEST(CraneModelDescription, PassiveCoordinatesAreColumnsOfTheToolJacobian)
+{
+  const auto model = production_model(crane_model::Tool::Epsilon7040);
+  ASSERT_TRUE(model.ok());
+  const auto jacobian = model.value().jacobian(valid_q(), crane_model::Frame::Tcp);
+  ASSERT_TRUE(jacobian.ok());
+
+  // robot_model §2.1: the tool pose depends on all eight coordinates, the two
+  // passive ones included, so no column of the tool Jacobian is zero except the
+  // gripper's, which moves the jaws and not the tool centre point.
+  for (Eigen::Index index = 0; index < 8; ++index) {
+    if (index == 7) {
+      EXPECT_LT(jacobian.value().value.col(index).norm(), 1.0e-15) << "column " << index;
+    } else {
+      EXPECT_GT(jacobian.value().value.col(index).norm(), 1.0e-3) << "column " << index;
+    }
+  }
+  // Named explicitly, because a Jacobian that zeroed them would still look
+  // plausible: q5 is the tip and q6 the tilt of the passive pendulum.
+  EXPECT_GT(jacobian.value().value.col(4).norm(), 0.5);
+  EXPECT_GT(jacobian.value().value.col(5).norm(), 0.5);
+
+  // The root does not move, so its Jacobian is zero and says so without
+  // pretending to be unavailable.
+  const auto root = model.value().jacobian(valid_q(), crane_model::Frame::MountingBase);
+  ASSERT_TRUE(root.ok());
+  EXPECT_DOUBLE_EQ(root.value().value.norm(), 0.0);
+}
+
+// --- the constants and the description are cross-checked ---------------------
+//
+// Issue 005's notes closed on this gap: the hydraulic subset compiles §6.2's
+// linkage dimensions in and the description was validated by substring, so a
+// description carrying different lengths was accepted without complaint. The
+// two tests below close it from both ends -- first that each placement the
+// description declares equals the compiled-in number, then that the
+// transmission the subset produces is still the one that geometry implies.
+//
+// Tolerance: 1e-5 m. Every placement agrees exactly except a_2, where §6.2
+// rounds the description's 3.49288333 m to 3.49288 m.
+namespace
+{
+constexpr double kLinkageTolerance = 1.0e-5;
+
+void expect_offset(
+  const parsed::Description& description, const std::string& parent, const std::string& child,
+  const Eigen::Vector3d& expected)
+{
+  const Eigen::Vector3d actual = description.offset(parent, child);
+  EXPECT_LT((actual - expected).norm(), kLinkageTolerance)
+    << parent << " -> " << child << " is " << actual.transpose()
+    << " in the description but " << expected.transpose() << " in the model";
+}
+}  // namespace
+
+TEST(CraneModelDescription, LinkagePlacementsAgreeWithTheCompiledConstants)
+{
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const parsed::Description description(tool);
+    const reference::BoomGeometry boom;
+    const reference::ArmGeometry arm;
+
+    // Boom four-bar, wiki/hydraulics.md §2.2. p_S0 appears twice in the
+    // description -- once as the cylinder joint and once as the suspension
+    // frame that exists so the point is visible without sim_hydraulics.
+    expect_offset(
+      description, "K1_slewing_column", "K1_boom_cylinder_suspension",
+      Eigen::Vector3d(boom.foot.x(), boom.foot.y(), 0.0));
+    expect_offset(
+      description, "K1_slewing_column", "boom_cylinder_mounting_on_slewing_column",
+      Eigen::Vector3d(boom.foot.x(), boom.foot.y(), 0.0));
+    expect_offset(
+      description, "K1_slewing_column", "boom_cylinder_linkage_big_mounting_on_slewing_column",
+      Eigen::Vector3d(boom.pivot.x(), boom.pivot.y(), 0.0));
+    // a_2 and p_S2 separately, then their sum, which is what the model rotates
+    // with q2.
+    expect_offset(description, "theta2_boom_joint", "K2_boom", Eigen::Vector3d(3.49288, 0.0, 0.0));
+    expect_offset(
+      description, "K2_boom", "boom_cylinder_linkage_small_mounting_on_boom",
+      Eigen::Vector3d(-3.039, boom.link.y(), 0.0));
+    expect_offset(
+      description, "theta2_boom_joint", "boom_cylinder_linkage_small_mounting_on_boom",
+      Eigen::Vector3d(boom.link.x(), boom.link.y(), 0.0));
+
+    // Arm cylinder, §2.3. p_S3z is the out-of-plane half of the pair of
+    // cylinders; the right one carries +0.224.
+    expect_offset(
+      description, "K2_boom", "K2_arm_cylinder_suspension",
+      Eigen::Vector3d(arm.foot.x(), arm.foot.y(), 0.0));
+    expect_offset(
+      description, "K2_boom", "arm_cylinder_mounting_on_boom_right",
+      Eigen::Vector3d(arm.foot.x(), arm.foot.y(), 0.224));
+    expect_offset(
+      description, "theta3_arm_joint", "K3_arm", Eigen::Vector3d(-0.3925, 0.0, 0.0));
+
+    if (tool != crane_model::Tool::Epsilon7040) {
+      continue;
+    }
+    // 7040 jaw four-bar, §2.6. a_9 and a_11 are the y and a_10 and a_12 the x
+    // coordinate of their dh transform, exactly as the deployed model reads
+    // them.
+    const reference::JawGeometry jaw;
+    expect_offset(
+      description, "K8_tool_center_point", "K9", Eigen::Vector3d(0.0, -jaw.outer_pivot, 0.0));
+    expect_offset(
+      description, "K8_tool_center_point", "K11", Eigen::Vector3d(0.0, jaw.inner_pivot, 0.0));
+    expect_offset(
+      description, "theta10_outer_jaw_joint", "K10_outer_jaw",
+      Eigen::Vector3d(jaw.outer_arm, 0.0, 0.0));
+    expect_offset(
+      description, "theta12_inner_jaw_joint", "K12_inner_jaw",
+      Eigen::Vector3d(jaw.inner_arm, 0.0, 0.0));
+    // The cylinder's barrel end. Its z is -0.015 m, which the planar four-bar
+    // of §2.6 drops on purpose; only x and y are the model's p_S7.
+    EXPECT_LT(
+      (description.planar("K10_outer_jaw", "pincer_cylinder_mounting_outer_jaw_joint") -
+      jaw.outer_pin).norm(), kLinkageTolerance);
+  }
+}
+
+TEST(CraneModelDescription, CylinderTransmissionFollowsTheDescriptionsGeometry)
+{
+  const parsed::Description rail(crane_model::Tool::Pzs100);
+  const parsed::Description jaws(crane_model::Tool::Epsilon7040);
+
+  // Rebuild the two crane linkages out of the description's own placements.
+  // What is left as a literal is exactly what the description does not carry:
+  // the drawbar and pushbar lengths, whose loop the description closes only in
+  // Gazebo, and the arm cylinder's rod-end attachment p_S4, which the Gazebo
+  // closure places at the K3_arm origin rather than at its real pin.
+  reference::BoomGeometry boom;
+  boom.foot = rail.planar("K1_slewing_column", "K1_boom_cylinder_suspension");
+  boom.pivot =
+    rail.planar("K1_slewing_column", "boom_cylinder_linkage_big_mounting_on_slewing_column");
+  boom.link =
+    rail.planar("theta2_boom_joint", "boom_cylinder_linkage_small_mounting_on_boom");
+
+  reference::ArmGeometry arm;
+  const Eigen::Vector3d arm_foot = rail.offset("K2_boom", "arm_cylinder_mounting_on_boom_right");
+  arm.foot = arm_foot.head<2>();
+  arm.link.x() = rail.offset("theta3_arm_joint", "K3_arm").x() + 0.274489;  // a_3 + p_S4x
+  arm.lateral = 0.224 - arm_foot.z();  // p_S4y - p_S3z
+
+  const auto model = production_model(crane_model::Tool::Pzs100);
+  ASSERT_TRUE(model.ok());
+  // The boom is the one axis with a residual, and all of it is §6.2's rounding
+  // of a_2: 3.49288 m against the description's 3.49288333 m moves the ratio by
+  // up to 5e-6. That is the 1e-5 m placement tolerance above, carried through
+  // the four-bar. Every other axis agrees to the difference quotient's own
+  // error, so they are held to 1e-8.
+  constexpr double kBoomRatioTolerance = 1.0e-5;
+  constexpr double kExactRatioTolerance = 1.0e-8;
+  for (const double q2 : {-1.0, -0.4, 0.0, 0.8, 1.5}) {
+    const auto jacobian = model.value().cylinder_jacobian(linkage_configuration(q2, 0.0));
+    ASSERT_TRUE(jacobian.ok()) << "q2 = " << q2;
+    EXPECT_NEAR(
+      jacobian.value()(1, 1),
+      reference::transmission_ratio(
+        [&boom](double angle) {return reference::boom_stroke_from(boom, angle);}, q2),
+      kBoomRatioTolerance) << "q2 = " << q2;
+  }
+  for (const double q3 : {-0.9, 0.0, 0.7, 1.5}) {
+    const auto jacobian = model.value().cylinder_jacobian(linkage_configuration(0.0, q3));
+    ASSERT_TRUE(jacobian.ok()) << "q3 = " << q3;
+    EXPECT_NEAR(
+      jacobian.value()(2, 2),
+      reference::transmission_ratio(
+        [&arm](double angle) {return reference::arm_stroke_from(arm, angle);}, q3),
+      kExactRatioTolerance) << "q3 = " << q3;
+  }
+
+  // The 7040 jaw. Its pivots, arms and barrel-end pin come from the description;
+  // the rod-end pin p_S8 and the fitted mirror law do not exist in any file of
+  // this workspace and stay the ported literals of issue 014.
+  reference::JawGeometry jaw;
+  jaw.outer_pivot = -jaws.offset("K8_tool_center_point", "K9").y();
+  jaw.inner_pivot = jaws.offset("K8_tool_center_point", "K11").y();
+  jaw.outer_arm = jaws.offset("theta10_outer_jaw_joint", "K10_outer_jaw").x();
+  jaw.inner_arm = jaws.offset("theta12_inner_jaw_joint", "K12_inner_jaw").x();
+  jaw.outer_pin = jaws.planar("K10_outer_jaw", "pincer_cylinder_mounting_outer_jaw_joint");
+
+  const auto jaw_model = production_model(crane_model::Tool::Epsilon7040);
+  ASSERT_TRUE(jaw_model.ok());
+  for (const double q8 : {0.5, 1.0, 2.0, 3.0}) {
+    const auto jacobian = jaw_model.value().cylinder_jacobian(jaw_configuration(q8));
+    ASSERT_TRUE(jacobian.ok()) << "q8 = " << q8;
+    EXPECT_NEAR(
+      jacobian.value()(5, 5),
+      reference::transmission_ratio(
+        [&jaw](double angle) {return reference::jaw_stroke_from(jaw, angle);}, q8),
+      kExactRatioTolerance) << "q8 = " << q8;
   }
 }

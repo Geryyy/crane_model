@@ -1,7 +1,21 @@
 #include "crane_model/model.hpp"
 
+#include <urdf_parser/urdf_parser.h>
+
+#include <algorithm>
 #include <cmath>
+#include <exception>
+#include <iterator>
 #include <utility>
+#include <vector>
+
+#include <pinocchio/multibody/data.hpp>
+#include <pinocchio/multibody/model.hpp>
+#include <pinocchio/parsers/urdf.hpp>
+#include <pinocchio/algorithm/frames.hpp>
+#include <pinocchio/algorithm/jacobian.hpp>
+#include <pinocchio/algorithm/joint-configuration.hpp>
+#include <pinocchio/algorithm/kinematics.hpp>
 
 namespace crane_model
 {
@@ -28,14 +42,58 @@ std::array<std::string, 8> joint_names(Tool tool)
     tool == Tool::Pzs100 ? "q9_left_rail_joint" : "theta10_outer_jaw_joint"};
 }
 
-bool contains(const std::string& text, const std::string& needle)
-{
-  return text.find(needle) != std::string::npos;
-}
-
 bool valid_tool(Tool tool)
 {
   return tool == Tool::Pzs100 || tool == Tool::Epsilon7040;
+}
+
+// The Frame -> URDF link map of the model API contract §3, written down once.
+// The contract's own enum comments abbreviate the links in *coordinate*
+// numbering (`K5_tip`, `K6_tilt`, `K7_rotator`); the descriptions number their
+// links K0..K8 in *link* numbering, which robot_model §0.1 warns is not the
+// same sequence. The spellings below are the ones the URDF actually carries.
+//
+// `world` and `tool_contact_point` are not in every description: only the 7040
+// gripper defines a contact point, and the world-to-K0 step is the world-model
+// boundary of contract §8 and stays outside this library. Both resolve to
+// FrameUnavailable rather than to a substituted pose.
+constexpr std::size_t kFrameCount = 12;
+
+struct FrameLink
+{
+  Frame frame;
+  const char * link;
+};
+
+constexpr std::array<FrameLink, kFrameCount> kFrameLinks{{
+  {Frame::World, "world"},
+  {Frame::MountingBase, "K0_mounting_base"},
+  {Frame::SlewingColumn, "K1_slewing_column"},
+  {Frame::Boom, "K2_boom"},
+  {Frame::Arm, "K3_arm"},
+  {Frame::BigTelescope, "K4_outer_telescope"},
+  {Frame::Tip, "K5_inner_telescope"},
+  {Frame::Tilt, "K6_double_joint_link"},
+  {Frame::Rotator, "K7_rotator_upper_part"},
+  {Frame::RotatorLowerPart, "K8_rotator_lower_part"},
+  {Frame::Tcp, "K8_tool_center_point"},
+  {Frame::ToolContact, "tool_contact_point"},
+}};
+
+constexpr bool frame_table_is_ordered()
+{
+  for (std::size_t index = 0; index < kFrameCount; ++index) {
+    if (static_cast<std::size_t>(kFrameLinks[index].frame) != index) {
+      return false;
+    }
+  }
+  return true;
+}
+static_assert(frame_table_is_ordered(), "kFrameLinks must be indexable by Frame");
+
+bool valid_frame(Frame frame)
+{
+  return static_cast<std::size_t>(frame) < kFrameCount;
 }
 
 // The six actuated axes in the canonical projection [0, 1, 2, 3, 6, 7] of the
@@ -65,13 +123,21 @@ constexpr double kTelescopeAnnulusArea = 2.592e-3;   // A_B, q4
 constexpr double kToolPistonArea = 7.854e-3;         // A_A, q8
 constexpr double kToolAnnulusArea = 4.737e-3;        // A_B, q8
 
-// Boom four-bar, wiki/hydraulics.md §2.2 with the values of §6.2.
+// Boom four-bar, wiki/hydraulics.md §2.2 with the values of §6.2. Every length
+// here except the two bar lengths is also a placement in the real description,
+// and CraneModelDescription.LinkageConstantsAgreeWithTheDescription asserts
+// that the two agree; the split of a_2 from p_S2x exists so each side of that
+// sum can be checked against the frame that carries it.
 constexpr double kBoomFootX = 0.433;             // p_S0
 constexpr double kBoomFootY = -1.7682;
 constexpr double kBoomPivotX = -0.12;            // p_S1
 constexpr double kBoomPivotY = -0.07;
-constexpr double kBoomLinkX = 3.49288 - 3.039;   // a_2 + p_S2x
+constexpr double kBoomJointToLinkX = 3.49288;    // a_2, theta2 joint to K2_boom
+constexpr double kBoomAttachmentX = -3.039;      // p_S2x, in K2_boom
+constexpr double kBoomLinkX = kBoomJointToLinkX + kBoomAttachmentX;
 constexpr double kBoomLinkY = -0.036034;         // p_S2y
+// r_13 and r_23. The description closes this loop only in Gazebo, so neither
+// bar length is a placement Pinocchio can read back out of it.
 constexpr double kDrawbarLength = 0.57;          // r_13, Zugstange
 constexpr double kPushbarLength = 0.124;         // r_23, Druckstange
 
@@ -81,9 +147,13 @@ constexpr double kPushbarLength = 0.124;         // r_23, Druckstange
 // in §2.3 before "normalising" it.
 constexpr double kArmFootX = -1.6802;              // p_S3x
 constexpr double kArmFootY = -0.0485;              // p_S3y
-constexpr double kArmLinkX = -0.3925 + 0.274489;   // a_3 + p_S4x
+constexpr double kArmFootZ = 0.224;                // p_S3z
+constexpr double kArmJointToLinkX = -0.3925;       // a_3, theta3 joint to K3_arm
+constexpr double kArmAttachmentX = 0.274489;       // p_S4x
+constexpr double kArmAttachmentY = 0.224;          // p_S4y
+constexpr double kArmLinkX = kArmJointToLinkX + kArmAttachmentX;
 constexpr double kArmLinkY = -0.468;               // -p_S4z
-constexpr double kArmLateralOffset = 0.224 - 0.224;  // p_S4y - p_S3z
+constexpr double kArmLateralOffset = kArmAttachmentY - kArmFootZ;
 
 // 7040 jaw four-bar, wiki/hydraulics.md §2.6. §6.2 carries none of its numbers,
 // so every constant below is ported from the deployed model under src/ and
@@ -372,6 +442,52 @@ Status not_ready()
   return failure(ErrorCode::NotReady, "model has no implementation state");
 }
 
+// One canonical coordinate's place in the parsed model. `unbounded` is the
+// `continuous` rotator of ROS 2 Interfaces §3.1: Pinocchio stores such a joint
+// as (cos, sin), so it occupies two configuration entries and one velocity
+// entry.
+struct JointSlot
+{
+  Eigen::Index config_index{0};
+  Eigen::Index velocity_index{0};
+  bool unbounded{false};
+};
+
+// A joint the description declares as a `<mimic>` of a canonical one. Two of
+// them matter here: `q5_small_telescope` mimics `q4_big_telescope`, which is
+// the second telescope stage of robot_model §0 and the doubling of
+// hydraulics §2.4, and the PZS100's `q11_right_rail_joint` mimics
+// `q9_left_rail_joint`, the simulation-only coupled joint of contract §2. The
+// multiplier and offset are read out of the description, not assumed.
+struct CoupledJoint
+{
+  JointSlot slot;
+  std::size_t source{0};  // canonical index driving this joint
+  double multiplier{1.0};
+  double offset{0.0};
+};
+
+// A canonical joint must exist and must be a single degree of freedom. The
+// contract calls a description that does not carry it `MissingJoint`; a
+// description that carries the name on something that is not a one-DoF joint is
+// not a joint map at all, and says so as `InvalidRobotDescription`.
+Status bind_joint(const pinocchio::Model& model, const std::string& name, JointSlot& slot)
+{
+  if (!model.existJointName(name)) {
+    return failure(ErrorCode::MissingJoint, "robot description is missing joint " + name);
+  }
+  const pinocchio::JointIndex id = model.getJointId(name);
+  const auto& joint = model.joints[id];
+  if (joint.nv() != 1 || (joint.nq() != 1 && joint.nq() != 2)) {
+    return failure(
+      ErrorCode::InvalidRobotDescription, "joint " + name + " is not a single degree of freedom");
+  }
+  slot.config_index = static_cast<Eigen::Index>(joint.idx_q());
+  slot.velocity_index = static_cast<Eigen::Index>(joint.idx_v());
+  slot.unbounded = joint.nq() == 2;
+  return Status{};
+}
+
 }  // namespace
 
 struct SymbolicGraph::Impl
@@ -415,9 +531,68 @@ bool SymbolicGraph::has_output_map() const noexcept
 
 struct Model::Impl
 {
+  explicit Impl(pinocchio::Model parsed)
+  : model(std::move(parsed)),
+    data(model),
+    configuration(pinocchio::neutral(model)),
+    neutral(configuration),
+    joint_jacobian(pinocchio::Data::Matrix6x::Zero(6, model.nv))
+  {
+  }
+
   Tool tool{Tool::Pzs100};
   std::array<std::string, 8> names{};
   std::array<AxisAreas, kActuatedDof> areas{};
+
+  // Built once in create(); every kinematic call below only reads the model and
+  // writes into the two workspaces, so contract §10 holds without allocating.
+  pinocchio::Model model;
+  pinocchio::Data data;
+  Eigen::VectorXd configuration;
+  Eigen::VectorXd neutral;
+  pinocchio::Data::Matrix6x joint_jacobian;
+  std::array<JointSlot, kGeneralizedDof> joints{};
+  std::vector<CoupledJoint> coupled;
+  std::array<pinocchio::FrameIndex, kFrameCount> frames{};
+  std::array<bool, kFrameCount> frame_present{};
+
+  Status require_frame(Frame frame) const
+  {
+    const std::size_t index = static_cast<std::size_t>(frame);
+    if (!frame_present[index]) {
+      return failure(
+        ErrorCode::FrameUnavailable,
+        std::string("the robot description carries no link ") + kFrameLinks[index].link);
+    }
+    return Status{};
+  }
+
+  void write_slot(const JointSlot& slot, double value)
+  {
+    if (slot.unbounded) {
+      configuration[slot.config_index] = std::cos(value);
+      configuration[slot.config_index + 1] = std::sin(value);
+    } else {
+      configuration[slot.config_index] = value;
+    }
+  }
+
+  // Joints outside the canonical eight keep their neutral value: the four
+  // cylinder sub-chains and the 7040's driven inner jaw are loops the
+  // description closes only in Gazebo, so their configuration is not a function
+  // of q and does not move any frame this API exposes.
+  void write_configuration(const Q& q)
+  {
+    configuration = neutral;
+    for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+      write_slot(joints[index], q[static_cast<Eigen::Index>(index)]);
+    }
+    for (const CoupledJoint& joint : coupled) {
+      write_slot(
+        joint.slot,
+        joint.multiplier * q[static_cast<Eigen::Index>(joint.source)] + joint.offset);
+    }
+  }
 };
 
 Model::Model(std::unique_ptr<Impl> impl) noexcept
@@ -439,32 +614,73 @@ Result<Model> Model::create(const ModelConfig& config)
     return Result<Model>::failure(
       failure(ErrorCode::UnsupportedTool, "tool is not supported"));
   }
-  if (!contains(config.robot_description_xml, "<robot") ||
-    config.robot_description_xml.find('>') == std::string::npos)
-  {
-    return Result<Model>::failure(
-      failure(ErrorCode::InvalidRobotDescription, "robot_description_xml is malformed"));
-  }
   if (!finite(config.gravity_m_s2) || config.gravity_m_s2.norm() <= 0.0) {
     return Result<Model>::failure(
       failure(ErrorCode::InvalidArgument, "gravity_m_s2 must be finite and non-zero"));
   }
 
-  const auto names = joint_names(config.tool);
-  for (const auto& name : names) {
-    if (!contains(config.robot_description_xml, name)) {
+  // The description is parsed twice on purpose. Pinocchio builds the kinematic
+  // tree and drops `<mimic>` -- with mimic parsing on it refuses this
+  // description outright, because the PZS100 declares the right rail as a mimic
+  // of a joint that comes *later* in its own depth-first order. urdfdom, which
+  // is Pinocchio's own URDF front end, still carries the mimic declarations, so
+  // the coupled joints are read from there rather than assumed.
+  ::urdf::ModelInterfaceSharedPtr tree;
+  pinocchio::Model parsed;
+  try {
+    tree = ::urdf::parseURDF(config.robot_description_xml);
+    if (!tree) {
       return Result<Model>::failure(
-        failure(ErrorCode::MissingJoint, "robot description is missing joint " + name));
+        failure(ErrorCode::InvalidRobotDescription, "robot_description_xml is not valid URDF"));
+    }
+    pinocchio::urdf::buildModelFromXML(config.robot_description_xml, parsed);
+  } catch (const std::exception& error) {
+    return Result<Model>::failure(
+      failure(
+        ErrorCode::InvalidRobotDescription,
+        std::string("robot_description_xml could not be parsed: ") + error.what()));
+  }
+  parsed.gravity.linear() = config.gravity_m_s2;
+
+  auto impl = std::make_unique<Impl>(std::move(parsed));
+  impl->tool = config.tool;
+  impl->names = joint_names(config.tool);
+  impl->areas = axis_areas();
+
+  const std::array<std::string, kGeneralizedDof>& canonical = impl->names;
+  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+    Status status = bind_joint(impl->model, canonical[index], impl->joints[index]);
+    if (!status.ok()) {
+      return Result<Model>::failure(std::move(status));
     }
   }
 
-  // Everything the hydraulic subset evaluates is built here, once. The three
-  // subset calls only read this state afterwards; the rigid-body, collision
-  // and symbolic backends are still absent and say so at call time.
-  auto impl = std::make_unique<Impl>();
-  impl->tool = config.tool;
-  impl->names = names;
-  impl->areas = axis_areas();
+  for (const auto& entry : tree->joints_) {
+    const auto& joint = entry.second;
+    if (!joint || !joint->mimic) {
+      continue;
+    }
+    const auto source = std::find(canonical.begin(), canonical.end(), joint->mimic->joint_name);
+    if (source == canonical.end() || !impl->model.existJointName(joint->name)) {
+      continue;
+    }
+    CoupledJoint coupled;
+    Status status = bind_joint(impl->model, joint->name, coupled.slot);
+    if (!status.ok()) {
+      return Result<Model>::failure(std::move(status));
+    }
+    coupled.source = static_cast<std::size_t>(std::distance(canonical.begin(), source));
+    coupled.multiplier = joint->mimic->multiplier;
+    coupled.offset = joint->mimic->offset;
+    impl->coupled.push_back(coupled);
+  }
+
+  for (std::size_t index = 0; index < kFrameCount; ++index) {
+    const bool present = impl->model.existFrame(kFrameLinks[index].link);
+    impl->frame_present[index] = present;
+    impl->frames[index] = present ? impl->model.getFrameId(kFrameLinks[index].link) : 0U;
+  }
+
   return Result<Model>::success(Model(std::move(impl)));
 }
 
@@ -549,6 +765,86 @@ Result<Vector6> Model::cylinder_force(const ChamberPressure& pressure) const
   return Result<Vector6>::success(force);
 }
 
+// robot_model §2.1: a direct Pinocchio evaluation. `from` is the frame the
+// answer is expressed in and `to` is the frame whose pose is asked for, so
+// `forward_kinematics(q, MountingBase, Tcp)` is the tool pose in K0.
+Result<Pose> Model::forward_kinematics(const Q& q, Frame from, Frame to) const
+{
+  if (!impl_) {
+    return Result<Pose>::failure(not_ready());
+  }
+  if (!valid_frame(from) || !valid_frame(to)) {
+    return Result<Pose>::failure(failure(ErrorCode::InvalidArgument, "frame is not a Frame value"));
+  }
+  if (!finite(q)) {
+    return Result<Pose>::failure(failure(ErrorCode::NonFiniteInput, "q is not finite"));
+  }
+  Status status = impl_->require_frame(from);
+  if (status.ok()) {
+    status = impl_->require_frame(to);
+  }
+  if (!status.ok()) {
+    return Result<Pose>::failure(std::move(status));
+  }
+
+  const pinocchio::FrameIndex source = impl_->frames[static_cast<std::size_t>(from)];
+  const pinocchio::FrameIndex target = impl_->frames[static_cast<std::size_t>(to)];
+  impl_->write_configuration(q);
+  pinocchio::forwardKinematics(impl_->model, impl_->data, impl_->configuration);
+  pinocchio::updateFramePlacement(impl_->model, impl_->data, source);
+  pinocchio::updateFramePlacement(impl_->model, impl_->data, target);
+  const pinocchio::SE3 relative = impl_->data.oMf[source].actInv(impl_->data.oMf[target]);
+
+  Pose pose;
+  pose.expressed_in = from;
+  pose.position_m = relative.translation();
+  pose.orientation = Eigen::Quaterniond(relative.rotation());
+  return Result<Pose>::success(std::move(pose));
+}
+
+// The 6x8 Jacobian of `frame`, expressed in `frame` itself, which is what the
+// result declares. All eight columns are real: the passive tip and tilt
+// coordinates move the tool exactly as the actuated ones do (robot_model §2.1),
+// and the telescope column carries both stages, because the description mimics
+// the small telescope onto q4.
+Result<Jacobian6x8> Model::jacobian(const Q& q, Frame frame) const
+{
+  if (!impl_) {
+    return Result<Jacobian6x8>::failure(not_ready());
+  }
+  if (!valid_frame(frame)) {
+    return Result<Jacobian6x8>::failure(
+      failure(ErrorCode::InvalidArgument, "frame is not a Frame value"));
+  }
+  if (!finite(q)) {
+    return Result<Jacobian6x8>::failure(failure(ErrorCode::NonFiniteInput, "q is not finite"));
+  }
+  Status status = impl_->require_frame(frame);
+  if (!status.ok()) {
+    return Result<Jacobian6x8>::failure(std::move(status));
+  }
+
+  const pinocchio::FrameIndex target = impl_->frames[static_cast<std::size_t>(frame)];
+  impl_->write_configuration(q);
+  pinocchio::computeJointJacobians(impl_->model, impl_->data, impl_->configuration);
+  pinocchio::updateFramePlacement(impl_->model, impl_->data, target);
+  impl_->joint_jacobian.setZero();
+  pinocchio::getFrameJacobian(
+    impl_->model, impl_->data, target, pinocchio::LOCAL, impl_->joint_jacobian);
+
+  Jacobian6x8 result;
+  result.expressed_in = frame;
+  for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
+    result.value.col(static_cast<Eigen::Index>(index)) =
+      impl_->joint_jacobian.col(impl_->joints[index].velocity_index);
+  }
+  for (const CoupledJoint& coupled : impl_->coupled) {
+    result.value.col(static_cast<Eigen::Index>(coupled.source)) +=
+      coupled.multiplier * impl_->joint_jacobian.col(coupled.slot.velocity_index);
+  }
+  return Result<Jacobian6x8>::success(std::move(result));
+}
+
 #define CRANE_MODEL_UNAVAILABLE(type, name) \
   Result<type> Model::name \
   { \
@@ -556,8 +852,6 @@ Result<Vector6> Model::cylinder_force(const ChamberPressure& pressure) const
       failure(ErrorCode::BackendUnavailable, "production model backend is unavailable")); \
   }
 
-CRANE_MODEL_UNAVAILABLE(Pose, forward_kinematics(const Q&, Frame, Frame) const)
-CRANE_MODEL_UNAVAILABLE(Jacobian6x8, jacobian(const Q&, Frame) const)
 CRANE_MODEL_UNAVAILABLE(QU, passive_equilibrium(const QA&, const Payload&) const)
 CRANE_MODEL_UNAVAILABLE(FullDynamics, full_dynamics(const Q&, const DQ&, const Payload&) const)
 CRANE_MODEL_UNAVAILABLE(
