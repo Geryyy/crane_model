@@ -267,8 +267,9 @@ SX output_map(
   const std::array<SX, kActuatedDof>& tau_a)
 {
   const std::array<SX, kActuatedDof> j_cyl = cylinder::jacobian_diagonal<SX>(
-    source.tool, coordinates.q[1], coordinates.q[2], coordinates.q[7]);
-  const std::array<cylinder::AxisAreas, kActuatedDof> areas = cylinder::axis_areas();
+    source.constants, source.tool, coordinates.q[1], coordinates.q[2], coordinates.q[7]);
+  const std::array<cylinder::AxisAreas, kActuatedDof> areas =
+    cylinder::axis_areas(source.constants);
 
   std::vector<SX> blocks;
   blocks.reserve(4 * kActuatedDof);
@@ -278,10 +279,11 @@ SX output_map(
   for (std::size_t axis = 0; axis < kActuatedDof; ++axis) {
     const SX velocity = j_cyl[axis] * coordinates.dq_a[axis];
     const SX magnitude =
-      sqrt(velocity * velocity + symbolic::kEpsAbs * symbolic::kEpsAbs);
+      sqrt(velocity * velocity + source.constants.eps_abs * source.constants.eps_abs);
     const double mean_area = 0.5 * (areas[axis].a_eff_pos + areas[axis].a_eff_neg);
     const double half_step = 0.5 * (areas[axis].a_eff_pos - areas[axis].a_eff_neg);
-    const SX effective_area = mean_area + half_step * tanh(velocity / symbolic::kEpsV);
+    const SX effective_area =
+      mean_area + half_step * tanh(velocity / source.constants.eps_v);
 
     cylinder_force.push_back(tau_a[axis] / j_cyl[axis]);
     piston_velocity.push_back(velocity);

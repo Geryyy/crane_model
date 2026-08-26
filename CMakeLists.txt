@@ -15,6 +15,10 @@ find_package(coal REQUIRED)
 # `nonLinearEffects` over a symbolic scalar is the only way to mean that
 # literally. `find_package(pinocchio)` already brings `casadi::casadi` in.
 find_package(casadi REQUIRED)
+# config/hydraulics.yaml is read in `Model::create`. yaml-cpp is the parser
+# wiki/implementation/libraries.md lists for configuration outside the parameter
+# system; it brings no ROS with it, so contract §6 still holds.
+find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} src/model.cpp src/symbolic_graph.cpp)
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
@@ -36,7 +40,17 @@ target_include_directories(${PROJECT_NAME}
 set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(${PROJECT_NAME}
   PUBLIC Eigen3::Eigen
-  PRIVATE pinocchio::pinocchio pinocchio::pinocchio_casadi coal::coal)
+  PRIVATE pinocchio::pinocchio pinocchio::pinocchio_casadi coal::coal yaml-cpp)
+
+# Where `hydraulics::default_path` looks for config/hydraulics.yaml. Two
+# candidates rather than one because the library is ROS-free (contract §6) and
+# has no ament index to ask, and `ModelConfig` is frozen so a caller cannot
+# hand it a third: the installed copy is what a deployed build reads, and the
+# source tree is what a build tree reads before anything has been installed.
+target_compile_definitions(${PROJECT_NAME}
+  PRIVATE
+    CRANE_MODEL_HYDRAULICS_YAML_INSTALLED="${CMAKE_INSTALL_PREFIX}/share/${PROJECT_NAME}/config/hydraulics.yaml"
+    CRANE_MODEL_HYDRAULICS_YAML_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/config/hydraulics.yaml")
 
 # The CasADi-facing half of contract §9, in a target of its own. It carries the
 # header and the CasADi usage requirements and nothing else: the builder itself
@@ -64,6 +78,12 @@ set_target_properties(${PROJECT_NAME}_casadi_graph
 install(
   DIRECTORY include/
   DESTINATION include)
+# The shared constants themselves, not just the code that reads them: this is
+# the copy `hydraulics::default_path` prefers and the copy the Python export
+# will read out of an installed workspace.
+install(
+  DIRECTORY config
+  DESTINATION share/${PROJECT_NAME})
 install(
   DIRECTORY symbolic/include/
   DESTINATION include/${PROJECT_NAME}_casadi_graph)
@@ -79,7 +99,7 @@ install(
   DESTINATION share/${PROJECT_NAME}/cmake)
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
-ament_export_dependencies(Eigen3 pinocchio coal casadi)
+ament_export_dependencies(Eigen3 pinocchio coal casadi yaml-cpp)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

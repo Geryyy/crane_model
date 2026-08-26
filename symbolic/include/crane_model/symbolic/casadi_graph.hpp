@@ -50,14 +50,16 @@ inline constexpr std::size_t kCylinderForceOffset = 6;
 inline constexpr std::size_t kPistonVelocityOffset = 12;
 inline constexpr std::size_t kAxisFlowOffset = 18;
 
-// The smoothing wiki/mpc.md §3.1 requires of constraint 7, applied to the
-// *model* and never to the inner loop's dead-zone compensator. Both are
-// compiled in, because `SymbolicGraphSpec` is frozen and carries no place for
-// them; both are far below the resolution any axis is commanded at, so the
-// smoothed Q agrees with `Model::transmission`'s to well under a part in 10^6
-// once |v| is a millimetre per second or more.
-inline constexpr double kEpsAbs = 1.0e-6;  // eps,   |v| ~= sqrt(v^2 + eps^2), m/s
-inline constexpr double kEpsV = 1.0e-3;    // eps_v, the A^{+-} switch scale,  m/s
+// The smoothing wiki/mpc.md §3.1 requires of constraint 7 -- eps in
+// |v| ~= sqrt(v^2 + eps^2) and eps_v in the tanh that replaces the A^{+-} step
+// -- is applied to the *model* and never to the inner loop's dead-zone
+// compensator. `SymbolicGraphSpec` is frozen and carries no place for the two
+// numbers, and they used to be compiled in here; they are now `smoothing.*` of
+// `crane_model/config/hydraulics.yaml`, so the Python export of these same
+// dynamics smooths with the values this graph smooths with rather than with a
+// copy of them. Both are far below the resolution any axis is commanded at, so
+// the smoothed Q agrees with `Model::transmission`'s to well under a part in
+// 10^6 once |v| is a millimetre per second or more.
 
 // The same equations as the numeric model, as CasADi functions.
 //

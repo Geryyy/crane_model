@@ -11,6 +11,7 @@
 #include <pinocchio/multibody/model.hpp>
 
 #include "crane_model/model.hpp"
+#include "cylinder_geometry.hpp"
 
 // The seam between the numeric model and the symbolic one. `model.cpp` parses
 // the description once and hands what it parsed across this header;
@@ -90,12 +91,15 @@ struct PayloadMount
   bool attachable{false};
 };
 
-// The description as parsed. `Model::create` builds its implementation state
-// out of one of these and `symbolic::casadi_graph` builds a graph out of
-// another, so the joint map, the mimic projection P, the damping and the
-// payload mount are stated once whichever way a caller arrives.
+// The description as parsed, together with the constants it does not carry.
+// `Model::create` builds its implementation state out of one of these and
+// `symbolic::casadi_graph` builds a graph out of another, so the joint map, the
+// mimic projection P, the damping and the payload mount are stated once
+// whichever way a caller arrives -- and so are the numbers of
+// `config/hydraulics.yaml`, which is read here rather than on each side.
 struct SymbolicSource
 {
+  hydraulics::Constants constants;
   pinocchio::Model model;
   Eigen::VectorXd neutral;
   std::array<JointSlot, kGeneralizedDof> joints{};

@@ -28,6 +28,41 @@ no public header, and a consumer links the shared libraries without ever seeing
 them (contract §6). The one exception is deliberate and is opt-in — see
 **The symbolic graph** below.
 
+### `config/hydraulics.yaml` — the constants the description does not carry
+
+The URDF is the ground truth for rigid-body dynamics and cannot drift. Four
+things live outside it, and they are in one file rather than in this source:
+
+- the chamber areas, `r_gear` and `V_m` of `wiki/hydraulics.md` §6.1, and the
+  boom and arm linkage geometry of §6.2 — the numbers `cylinder_jacobian`,
+  `transmission` and `cylinder_force` are computed from;
+- the 7040 jaw four-bar of §2.6, whose equations the wiki carries and whose
+  numbers it does not; each entry names the deployed file it was ported from;
+- the per-joint **damping override** table, which is how the telescope entry
+  comes out zero (see **`D`** below);
+- the canonical joint-name map of contract §2, and the two smoothing constants
+  `wiki/mpc.md` §3.1 asks of the symbolic graph.
+
+They are a file because a Python export of this same model — `pinocchio.casadi`
+over the same URDF — needs every one of them and would otherwise be *told* them
+a second time. A constant compiled in here and typed in there is drift nothing
+would catch, so nothing above appears as a literal in any `.hpp` or `.cpp` of
+this package. `test_contract.cpp` restates `wiki/hydraulics.md` §6.1 and §6.2
+and asserts the file against them, so an edit to the file that contradicts the
+wiki fails the build.
+
+`Model::create` reads it first, before it touches the description — the joint
+map is in there, so there is nothing to walk until it has been read. A missing
+file, a missing key, a key that is not a number and a damping override with no
+stated reason are each `InvalidArgument` naming the key: never a default,
+because a hydraulic constant that quietly fell back to zero is a force limit
+that quietly fell back to zero.
+
+The path is compiled in, the installed copy first and the source tree second.
+This package is ROS-free, so there is no ament index to ask, and `ModelConfig`
+is frozen, so a caller cannot pass a third. yaml-cpp does the parsing
+(`wiki/implementation/libraries.md`); it brings no ROS with it.
+
 ### Frames
 
 `Frame` maps onto URDF link names once, in `src/model.cpp`. The contract's own
@@ -97,10 +132,13 @@ recorded-trajectory parity campaign is for.
   `wiki/implementation/parameters.md` §1 and §5 — which is also what makes the
   passive damping tool-dependent without a table in this file, since the two
   descriptions carry §5's hand-tuned per-tool values. Two deliberate departures:
-  - **the telescope entry is zero.** §5 calls the URDF's `3.4e4` a simulation
-    stability hack an order of magnitude above the identified value and says it
-    must not enter the model. No identified value is recorded anywhere in the
-    vault, so the entry is zero rather than a guess.
+  - **the telescope entry is zero**, and it is zero because
+    `config/hydraulics.yaml` says so. `damping_overrides` is a table of
+    `{joint, d, reason}`; `parse` applies whatever is on it and knows nothing
+    about which joint that is. The row's own reason is §5's: the URDF's `3.4e4`
+    is a simulation stability hack an order of magnitude above the identified
+    value and must not enter the model, and no identified value is recorded
+    anywhere in the vault, so the entry is zero rather than a guess.
   - **the mimicked joints' own damping is not added.** §5 tabulates damping per
     machine axis, and the mirrored rail's entry is the same simulation number
     duplicated for Gazebo; adding it would silently double the PZS100 tool axis
@@ -427,10 +465,12 @@ is not being differentiated. The two therefore differ by
 
 $$\abs{\Delta Q_i} \le A_i\eps + \tfrac12\abs{A_i^{+}-A_i^{-}}\left(1-\tanh\frac{\abs{v_i}}{\eps_v}\right)\abs{v_i}$$
 
-with $\eps = 10^{-6}$ and $\eps_v = 10^{-3}$ m/s compiled in — `SymbolicGraphSpec`
-is frozen and has nowhere to carry them. That is around `1e-8` m³/s once an axis
-is moving at more than a few millimetres per second, and it is the bound the
-test asserts rather than a tolerance picked to pass.
+with $\eps = 10^{-6}$ and $\eps_v = 10^{-3}$ m/s out of `smoothing.*` of
+`config/hydraulics.yaml` — `SymbolicGraphSpec` is frozen and has nowhere to
+carry them, and the Python export smooths with the values this graph smooths
+with rather than with a copy of them. That is around `1e-8` m³/s once an axis is
+moving at more than a few millimetres per second, and it is the bound the test
+asserts rather than a tolerance picked to pass.
 
 ### The CasADi handles live in a separate target
 
@@ -563,8 +603,8 @@ test builds real models from, one per tool. They are generated, never
 hand-edited; each file's header carries the `xacro` command that produced it.
 Regenerate them when `epsilon_crane_description` or a tool description changes —
 `LinkagePlacementsAgreeWithTheCompiledConstants` and
-`CylinderTransmissionFollowsTheDescriptionsGeometry` then say whether the
-hydraulic subset's compiled-in geometry still agrees with the description, and
+`CylinderTransmissionFollowsTheDescriptionsGeometry` then say whether
+`config/hydraulics.yaml`'s linkage geometry still agrees with the description, and
 `PrimitivesWereFittedToThisDescription` says the same for the collision fit.
 When it fails, re-run the derivation rather than editing the fit:
 

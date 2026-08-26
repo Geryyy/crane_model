@@ -3,6 +3,8 @@
 
 #include <array>
 #include <cstddef>
+#include <string>
+#include <vector>
 
 #include "crane_model/model.hpp"
 
@@ -15,6 +17,12 @@
 // second transcription of the four-bars is exactly the failure the symbolic
 // graph exists to rule out.
 //
+// The numbers it is evaluated with are not here. They are
+// `config/hydraulics.yaml`, read once into the `hydraulics::Constants` below
+// and threaded through every function as an argument, because a second reader
+// of this model -- the Python export that builds the same dynamics with
+// `pinocchio.casadi` -- needs the same numbers and must not be told them twice.
+//
 // Nothing here allocates and nothing branches on the value of a coordinate, so
 // the same expression is valid for every scalar type. A configuration at which
 // a linkage does not close produces a non-finite ratio rather than a flag: the
@@ -26,6 +34,123 @@
 
 namespace crane_model
 {
+namespace hydraulics
+{
+
+// `config/hydraulics.yaml`, as read. Everything in it is a number the robot
+// description does not carry and a Python export of this model would otherwise
+// have to be told a second time, which is the whole reason it is a file: a
+// constant compiled in here and typed in there is drift nothing would catch.
+// The symbols are the `Code` column of wiki/nomenclature.md §7 and §10; the
+// file names, per entry, the wiki/hydraulics.md section each number came from.
+//
+// It is declared in this header rather than in one of its own because this is
+// the header both sides of the model already include: `model.cpp` evaluates the
+// transmission below with `double` and `symbolic_graph.cpp` with `casadi::SX`,
+// and giving them two headers to agree about would reintroduce the seam.
+
+// One joint whose damping the description states and the model does not use.
+// Carried as data with its reason rather than as a branch in `parse`, so the
+// model applies the table and knows nothing about which joint is on it.
+struct DampingOverride
+{
+  std::string joint;
+  double d{};          // the entry of D, wiki/nomenclature.md §6
+  std::string reason;  // why the description's own entry is not used
+};
+
+struct Constants
+{
+  double r_gear{};  // §6.1, slewing rack-and-pinion radius, m
+  double v_m{};     // §6.1, rotator motor volumetric displacement, m^3/rad
+
+  // §6.1. The force-producing areas of §4, per hydraulic axis. Slewing carries
+  // no A_B because §6.1 states none: its circuit is symmetric.
+  double slewing_a_a{};
+  double boom_a_a{};
+  double boom_a_b{};
+  double arm_a_a{};
+  double arm_a_b{};
+  double telescope_a_a{};
+  double telescope_a_b{};
+  double tool_a_a{};
+  double tool_a_b{};
+
+  // Boom four-bar, §2.2 with the values of §6.2. a_2 is split from p_S2x so
+  // each side of that sum can be checked against the frame that carries it;
+  // `LinkagePlacementsAgreeWithTheCompiledConstants` does exactly that.
+  double boom_ps0_x{};
+  double boom_ps0_y{};
+  double boom_ps1_x{};
+  double boom_ps1_y{};
+  double boom_a2{};      // theta2 joint to K2_boom
+  double boom_ps2_x{};   // in K2_boom
+  double boom_ps2_y{};
+  double r13{};          // Zugstange
+  double r23{};          // Druckstange
+
+  // Arm cylinder, §2.3 with the values of §6.2.
+  double arm_ps3_x{};
+  double arm_ps3_y{};
+  double arm_ps3_z{};
+  double arm_a3{};       // theta3 joint to K3_arm
+  double arm_ps4_x{};
+  double arm_ps4_y{};
+  double arm_ps4_z{};
+
+  // 7040 jaw four-bar, §2.6, whose numbers §6.2 does not carry.
+  double jaw_p0{};       // phi_sim,9(q8), quadratic coefficient
+  double jaw_p1{};
+  double jaw_p2{};
+  double jaw_a9{};       // outer jaw pivot on the pincer frame
+  double jaw_a10{};      // outer jaw arm
+  double jaw_a11{};      // inner jaw pivot
+  double jaw_a12{};      // inner jaw arm
+  double jaw_ps7_x{};    // barrel end, on the outer jaw
+  double jaw_ps7_y{};
+  double jaw_ps8_x{};    // rod end, on the inner jaw
+  double jaw_ps8_y{};
+
+  // The smoothing wiki/mpc.md §3.1 requires of constraint 7, applied to the
+  // *model* and never to the inner loop's dead-zone compensator.
+  double eps_abs{};      // |v| ~= sqrt(v^2 + eps^2), m/s
+  double eps_v{};        // the A^{+-} switch scale, m/s
+
+  // The canonical eight of the model API contract §2, per tool. Only the
+  // eighth entry differs between the two descriptions.
+  std::array<std::string, kGeneralizedDof> pzs100_joints{};
+  std::array<std::string, kGeneralizedDof> epsilon7040_joints{};
+
+  std::vector<DampingOverride> damping_overrides;
+
+  // The sums the linkages actually rotate. Written here rather than in the
+  // file because they are not measurements: each is a statement about which
+  // frame the other two numbers are expressed in.
+  [[nodiscard]] double boom_link_x() const { return boom_a2 + boom_ps2_x; }
+  [[nodiscard]] double arm_link_x() const { return arm_a3 + arm_ps4_x; }
+  [[nodiscard]] double arm_link_y() const { return -arm_ps4_z; }
+  [[nodiscard]] double arm_lateral_offset() const { return arm_ps4_y - arm_ps3_z; }
+
+  [[nodiscard]] const std::array<std::string, kGeneralizedDof>& joints(Tool tool) const
+  {
+    return tool == Tool::Pzs100 ? pzs100_joints : epsilon7040_joints;
+  }
+};
+
+// Where the build put `config/hydraulics.yaml`: the installed copy if it is
+// there, the source tree otherwise. `crane_model` is ROS-free (contract §6), so
+// there is no ament index to ask and the two candidates are compiled in.
+std::string default_path();
+
+// Reads `path`, or `default_path()`. Defined in `model.cpp`, which owns the
+// file front ends. A missing file, a missing key and a key that is not a number
+// are all `InvalidArgument` naming the key -- never a default, because a wrong
+// hydraulic constant is a wrong force limit.
+Status load(const std::string& path, Constants& out);
+Status load(Constants& out);
+
+}  // namespace hydraulics
+
 namespace cylinder
 {
 
@@ -41,86 +166,6 @@ enum AxisIndex : std::size_t
   kToolAxis = 5,
 };
 
-// Machine constants, wiki/hydraulics.md §6. They are verified there against
-// parameter_def.cpp and the URDF; symbols follow wiki/nomenclature.md §7.
-constexpr double kGearRadius = 0.1;               // r_gear, m
-constexpr double kMotorDisplacement = 1.4324e-4;  // V_m, m^3/rad
-
-constexpr double kSlewingPistonArea = 6.362e-3;      // A_A, q1
-constexpr double kBoomPistonArea = 1.5394e-2;        // A_A, q2
-constexpr double kBoomAnnulusArea = 9.032e-3;        // A_B, q2
-constexpr double kArmPistonArea = 6.362e-3;          // A_A, q3
-constexpr double kArmAnnulusArea = 2.5133e-3;        // A_B, q3
-constexpr double kTelescopePistonArea = 3.8485e-3;   // A_A, q4
-constexpr double kTelescopeAnnulusArea = 2.592e-3;   // A_B, q4
-constexpr double kToolPistonArea = 7.854e-3;         // A_A, q8
-constexpr double kToolAnnulusArea = 4.737e-3;        // A_B, q8
-
-// Boom four-bar, wiki/hydraulics.md §2.2 with the values of §6.2. Every length
-// here except the two bar lengths is also a placement in the real description,
-// and CraneModelDescription.LinkageConstantsAgreeWithTheDescription asserts
-// that the two agree; the split of a_2 from p_S2x exists so each side of that
-// sum can be checked against the frame that carries it.
-constexpr double kBoomFootX = 0.433;             // p_S0
-constexpr double kBoomFootY = -1.7682;
-constexpr double kBoomPivotX = -0.12;            // p_S1
-constexpr double kBoomPivotY = -0.07;
-constexpr double kBoomJointToLinkX = 3.49288;    // a_2, theta2 joint to K2_boom
-constexpr double kBoomAttachmentX = -3.039;      // p_S2x, in K2_boom
-constexpr double kBoomLinkX = kBoomJointToLinkX + kBoomAttachmentX;
-constexpr double kBoomLinkY = -0.036034;         // p_S2y
-// r_13 and r_23. The description closes this loop only in Gazebo, so neither
-// bar length is a placement Pinocchio can read back out of it.
-constexpr double kDrawbarLength = 0.57;          // r_13, Zugstange
-constexpr double kPushbarLength = 0.124;         // r_23, Druckstange
-
-// Arm cylinder, wiki/hydraulics.md §2.3 with the values of §6.2. The lateral
-// term is p_S4y - p_S3z and not p_S4z - p_S3z because the two attachment
-// points live in links with different CAD-to-model rotations; see the callout
-// in §2.3 before "normalising" it.
-constexpr double kArmFootX = -1.6802;              // p_S3x
-constexpr double kArmFootY = -0.0485;              // p_S3y
-constexpr double kArmFootZ = 0.224;                // p_S3z
-constexpr double kArmJointToLinkX = -0.3925;       // a_3, theta3 joint to K3_arm
-constexpr double kArmAttachmentX = 0.274489;       // p_S4x
-constexpr double kArmAttachmentY = 0.224;          // p_S4y
-constexpr double kArmLinkX = kArmJointToLinkX + kArmAttachmentX;
-constexpr double kArmLinkY = -0.468;               // -p_S4z
-constexpr double kArmLateralOffset = kArmAttachmentY - kArmFootZ;
-
-// 7040 jaw four-bar, wiki/hydraulics.md §2.6. §6.2 carries none of its numbers,
-// so every constant below is ported from the deployed model under src/ and
-// names the file it came from. None of them is a §6.2 value.
-//
-// The fitted mirror law phi_sim,9(q8), which §2.6 says is the variant the
-// deployed model uses, in the Horner form of
-// timber_crane_model_cpp/include/timber_crane_model_cpp/maple/
-// comp_eq_four_bar.hpp:7, with jaw_linkage_p of
-// crane_tools_description/7040/config/gripper_parameter.yaml:13.
-constexpr double kJawMirrorQuadratic = -0.121220;  // p_0
-constexpr double kJawMirrorLinear = 1.400122;      // p_1
-constexpr double kJawMirrorConstant = -0.227867;   // p_2
-
-// The two jaw pivots on the pincer frame and the two jaw arm lengths. The
-// deployed model reads them from the URDF DH transforms in
-// timber_crane_parameter/src/parameter_def.cpp:196-206; the joint origins are
-// in crane_tools_description/7040/urdf/links/. Note a_9 and a_11 are the y and
-// a_10 and a_12 the x coordinate of their origin, per the comment there.
-constexpr double kOuterJawPivotOffset = 0.328;  // a_9, -dh_trans9 y
-constexpr double kOuterJawArmLength = 0.8126;   // a_10, dh_trans10 x
-constexpr double kInnerJawPivotOffset = 0.336;  // a_11, dh_trans11 y
-constexpr double kInnerJawArmLength = 0.8172;   // a_12, dh_trans12 x
-
-// The jaw cylinder's two attachment points. The barrel end sits on the outer
-// jaw, joint pincer_cylinder_mounting_outer_jaw_joint of crane_tools_description
-// /7040/urdf/joints/hydraulic/gripper_cylinder_joints.urdf.xacro:15. The rod end
-// sits on the inner jaw and is hard-coded in gripper_parameter.yaml:5-7 because
-// the URDF closes that loop only in Gazebo.
-constexpr double kJawCylinderOuterX = -0.8971;    // p_S7x
-constexpr double kJawCylinderOuterY = 0.01754;    // p_S7y
-constexpr double kJawCylinderInnerX = -0.908397;  // p_S8x
-constexpr double kJawCylinderInnerY = 0.015289;   // p_S8y
-
 // Effective areas per axis. a_a and a_b are the force-producing areas of §4,
 // a_eff_pos and a_eff_neg the direction-dependent pump draw of §3. The rotator
 // carries V_m in all four, in m^3/rad.
@@ -132,34 +177,36 @@ struct AxisAreas
   double a_eff_neg{};
 };
 
-inline std::array<AxisAreas, kActuatedDof> axis_areas()
+// What each axis does with the areas of §6.1 -- two cylinders, a differential
+// one, a regenerative circuit, a motor -- is the circuit topology of §2 and §3
+// and stays here. Only the numbers it composes come out of the file.
+inline std::array<AxisAreas, kActuatedDof> axis_areas(const hydraulics::Constants& constants)
 {
   std::array<AxisAreas, kActuatedDof> areas{};
   // q1 slewing: two cylinders, symmetric circuit, so both chambers see 2 A_A.
   areas[kSlewingAxis] = {
-    2.0 * kSlewingPistonArea, 2.0 * kSlewingPistonArea,
-    2.0 * kSlewingPistonArea, 2.0 * kSlewingPistonArea};
+    2.0 * constants.slewing_a_a, 2.0 * constants.slewing_a_a,
+    2.0 * constants.slewing_a_a, 2.0 * constants.slewing_a_a};
   // q2 boom: a single differential cylinder.
   areas[kBoomAxis] = {
-    kBoomPistonArea, kBoomAnnulusArea, kBoomPistonArea, kBoomAnnulusArea};
+    constants.boom_a_a, constants.boom_a_b, constants.boom_a_a, constants.boom_a_b};
   // q3 arm: two differential cylinders, one expression (§2.3).
   areas[kArmAxis] = {
-    2.0 * kArmPistonArea, 2.0 * kArmAnnulusArea,
-    2.0 * kArmPistonArea, 2.0 * kArmAnnulusArea};
+    2.0 * constants.arm_a_a, 2.0 * constants.arm_a_b,
+    2.0 * constants.arm_a_a, 2.0 * constants.arm_a_b};
   // q4 telescope: regenerative on extension. Rod-side oil is fed back to the
   // piston side, so only the annulus difference is drawn from the pump. The
   // force still follows the physical areas, which is why a_a and a_eff_pos
   // differ on this axis alone.
   areas[kTelescopeAxis] = {
-    kTelescopePistonArea, kTelescopeAnnulusArea,
-    kTelescopePistonArea - kTelescopeAnnulusArea, kTelescopeAnnulusArea};
+    constants.telescope_a_a, constants.telescope_a_b,
+    constants.telescope_a_a - constants.telescope_a_b, constants.telescope_a_b};
   // q7 rotator: a motor, where V_m takes the role the piston area plays
   // elsewhere (§2.5). Symmetric in both directions.
-  areas[kRotatorAxis] = {
-    kMotorDisplacement, kMotorDisplacement, kMotorDisplacement, kMotorDisplacement};
+  areas[kRotatorAxis] = {constants.v_m, constants.v_m, constants.v_m, constants.v_m};
   // q8 tool: a cylinder axis on the same pump, areas per §6.1.
   areas[kToolAxis] = {
-    kToolPistonArea, kToolAnnulusArea, kToolPistonArea, kToolAnnulusArea};
+    constants.tool_a_a, constants.tool_a_b, constants.tool_a_a, constants.tool_a_b};
   return areas;
 }
 
@@ -260,27 +307,27 @@ struct CylinderStroke
 // `delta` negative and its square root, and therefore the ratio, not finite:
 // the linkage cannot close there and there is no piston displacement to report.
 template<typename Scalar>
-CylinderStroke<Scalar> boom_stroke(const Scalar& q2)
+CylinderStroke<Scalar> boom_stroke(const hydraulics::Constants& constants, const Scalar& q2)
 {
   using std::sqrt;
-  const Planar<Scalar> p_s0{Scalar(kBoomFootX), Scalar(kBoomFootY)};
-  const Planar<Scalar> p_s1{Scalar(kBoomPivotX), Scalar(kBoomPivotY)};
+  const Planar<Scalar> p_s0{Scalar(constants.boom_ps0_x), Scalar(constants.boom_ps0_y)};
+  const Planar<Scalar> p_s1{Scalar(constants.boom_ps1_x), Scalar(constants.boom_ps1_y)};
 
   const Planar<Scalar> p_s2 =
-    rotate(q2, Planar<Scalar>{Scalar(kBoomLinkX), Scalar(kBoomLinkY)});
+    rotate(q2, Planar<Scalar>{Scalar(constants.boom_link_x()), Scalar(constants.boom_ps2_y)});
   const Planar<Scalar> d_pivot = p_s2 - p_s1;
   const Planar<Scalar> d_pivot_rate = perpendicular(p_s2);  // d(p_S2)/dq2
 
   const Scalar d_squared = squared_norm(d_pivot);
   const Scalar d_squared_rate = 2.0 * dot(d_pivot, d_pivot_rate);
 
-  const double reach_sum = kDrawbarLength + kPushbarLength;
-  const double reach_difference = kDrawbarLength - kPushbarLength;
+  const double reach_sum = constants.r13 + constants.r23;
+  const double reach_difference = constants.r13 - constants.r23;
   const Scalar delta = (reach_sum * reach_sum - d_squared) *
     (d_squared - reach_difference * reach_difference);
 
   const double link_difference =
-    kDrawbarLength * kDrawbarLength - kPushbarLength * kPushbarLength;
+    constants.r13 * constants.r13 - constants.r23 * constants.r23;
   const Scalar alpha = (link_difference + d_squared) / (2.0 * d_squared);
   const Scalar alpha_rate = -link_difference / (2.0 * d_squared * d_squared) * d_squared_rate;
 
@@ -309,17 +356,17 @@ CylinderStroke<Scalar> boom_stroke(const Scalar& q2)
 // q3 while the out-of-plane offset stays constant. The lateral offset keeps the
 // stroke away from zero, so this axis has no degenerate configuration.
 template<typename Scalar>
-CylinderStroke<Scalar> arm_stroke(const Scalar& q3)
+CylinderStroke<Scalar> arm_stroke(const hydraulics::Constants& constants, const Scalar& q3)
 {
   using std::sqrt;
   const Planar<Scalar> moving =
-    rotate(q3, Planar<Scalar>{Scalar(kArmLinkX), Scalar(kArmLinkY)});
+    rotate(q3, Planar<Scalar>{Scalar(constants.arm_link_x()), Scalar(constants.arm_link_y())});
   const Planar<Scalar> in_plane =
-    moving - Planar<Scalar>{Scalar(kArmFootX), Scalar(kArmFootY)};
+    moving - Planar<Scalar>{Scalar(constants.arm_ps3_x), Scalar(constants.arm_ps3_y)};
   const Planar<Scalar> in_plane_rate = perpendicular(moving);
 
-  const Scalar stroke =
-    sqrt(squared_norm(in_plane) + kArmLateralOffset * kArmLateralOffset);
+  const double lateral = constants.arm_lateral_offset();
+  const Scalar stroke = sqrt(squared_norm(in_plane) + lateral * lateral);
   return CylinderStroke<Scalar>{stroke, dot(in_plane, in_plane_rate) / stroke};
 }
 
@@ -333,25 +380,25 @@ CylinderStroke<Scalar> arm_stroke(const Scalar& q3)
 // are p_S8z + p_S7z = 24.25 mm apart out of plane, which the deployed model
 // drops and which is worth at most 0.6 mm of length over the jaw range.
 template<typename Scalar>
-CylinderStroke<Scalar> jaw_stroke(const Scalar& q8)
+CylinderStroke<Scalar> jaw_stroke(const hydraulics::Constants& constants, const Scalar& q8)
 {
   const Scalar mirror_angle =
-    (kJawMirrorQuadratic * q8 + kJawMirrorLinear) * q8 + kJawMirrorConstant;
-  const Scalar mirror_rate = 2.0 * kJawMirrorQuadratic * q8 + kJawMirrorLinear;
+    (constants.jaw_p0 * q8 + constants.jaw_p1) * q8 + constants.jaw_p2;
+  const Scalar mirror_rate = 2.0 * constants.jaw_p0 * q8 + constants.jaw_p1;
 
   const Planar<Scalar> outer_arm = rotate(
     q8,
     Planar<Scalar>{
-      Scalar(kOuterJawArmLength + kJawCylinderOuterX), Scalar(kJawCylinderOuterY)});
+      Scalar(constants.jaw_a10 + constants.jaw_ps7_x), Scalar(constants.jaw_ps7_y)});
   const Planar<Scalar> inner_arm = rotate(
     mirror_angle,
     Planar<Scalar>{
-      Scalar(kInnerJawArmLength + kJawCylinderInnerX), Scalar(kJawCylinderInnerY)});
+      Scalar(constants.jaw_a12 + constants.jaw_ps8_x), Scalar(constants.jaw_ps8_y)});
 
   // The reflection applies to the outer arm and to its rate alike, and it is
   // applied *after* S_perp in both -- diag(-1, 1) and S_perp do not commute.
   const Planar<Scalar> c_cyl = inner_arm - mirrored(outer_arm) +
-    Planar<Scalar>{Scalar(kInnerJawPivotOffset + kOuterJawPivotOffset), Scalar(0.0)};
+    Planar<Scalar>{Scalar(constants.jaw_a11 + constants.jaw_a9), Scalar(0.0)};
   const Planar<Scalar> c_cyl_rate =
     mirror_rate * perpendicular(inner_arm) - mirrored(perpendicular(outer_arm));
 
@@ -368,13 +415,14 @@ CylinderStroke<Scalar> jaw_stroke(const Scalar& q8)
 // either scalar type.
 template<typename Scalar>
 std::array<Scalar, kActuatedDof> jacobian_diagonal(
-  Tool tool, const Scalar& q2, const Scalar& q3, const Scalar& q8)
+  const hydraulics::Constants& constants, Tool tool,
+  const Scalar& q2, const Scalar& q3, const Scalar& q8)
 {
   std::array<Scalar, kActuatedDof> diagonal{};
   // q1 slewing: rack and pinion, the only constant transmission (§2.1).
-  diagonal[kSlewingAxis] = Scalar(kGearRadius);
-  diagonal[kBoomAxis] = boom_stroke(q2).ratio;
-  diagonal[kArmAxis] = arm_stroke(q3).ratio;
+  diagonal[kSlewingAxis] = Scalar(constants.r_gear);
+  diagonal[kBoomAxis] = boom_stroke(constants, q2).ratio;
+  diagonal[kArmAxis] = arm_stroke(constants, q3).ratio;
   // q4 telescope: the cylinder is one-to-one with the joint coordinate; the
   // factor of two sits between q4 and the tip travel, not here (§2.4).
   diagonal[kTelescopeAxis] = Scalar(1.0);
@@ -384,7 +432,7 @@ std::array<Scalar, kActuatedDof> jacobian_diagonal(
   // no linkage to solve; the 7040 jaw is a four-bar and its cylinder spans both
   // jaws, so its ratio is configuration-dependent like the boom's.
   diagonal[kToolAxis] =
-    tool == Tool::Pzs100 ? Scalar(1.0) : jaw_stroke(q8).ratio;
+    tool == Tool::Pzs100 ? Scalar(1.0) : jaw_stroke(constants, q8).ratio;
   return diagonal;
 }
 

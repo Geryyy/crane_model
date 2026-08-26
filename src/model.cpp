@@ -8,9 +8,12 @@
 
 #include <Eigen/Cholesky>
 
+#include <yaml-cpp/yaml.h>
+
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -33,8 +36,266 @@
 #include "cylinder_geometry.hpp"
 #include "symbolic_graph.hpp"
 
+#if !defined(CRANE_MODEL_HYDRAULICS_YAML_INSTALLED) || \
+  !defined(CRANE_MODEL_HYDRAULICS_YAML_SOURCE)
+#error "the build must say where config/hydraulics.yaml is; see CMakeLists.txt"
+#endif
+
 namespace crane_model
 {
+
+// --- config/hydraulics.yaml --------------------------------------------------
+//
+// The constants of `hydraulics::Constants`, read out of the file instead of
+// compiled in, so the Python export that builds these same dynamics with
+// `pinocchio.casadi` reads the numbers rather than a copy of them. The parsing
+// is yaml-cpp's (wiki/implementation/libraries.md); nothing here re-implements
+// a format.
+//
+// Every read goes through the reader below, so a key that is absent, empty, of
+// the wrong shape or not a number is `InvalidArgument` naming the file and the
+// key. Nothing in here has a default: style guide §4, and a hydraulic constant
+// that quietly fell back to zero is a force limit that quietly fell back to
+// zero.
+namespace hydraulics
+{
+namespace
+{
+
+// yaml-cpp's `Node` is a handle into the document, and `node = node[key]`
+// *writes* through that handle. Every descent below therefore goes through
+// `reset`, which rebinds it instead.
+class Reader
+{
+public:
+  Reader(const YAML::Node& root, std::string path)
+  : root_(root), path_(std::move(path))
+  {
+  }
+
+  [[nodiscard]] const Status& status() const { return status_; }
+
+  void fail(const std::string& key, const char * why)
+  {
+    if (status_.ok()) {
+      status_ = Status{ErrorCode::InvalidArgument, path_ + ": " + key + " " + why};
+    }
+  }
+
+  // The node at a dotted key, or an undefined node once the first descent has
+  // failed. Only mappings are descended into; a sequence is asked for by name.
+  YAML::Node at(const std::string& key)
+  {
+    YAML::Node node(root_);
+    std::size_t start = 0;
+    while (true) {
+      const std::size_t dot = key.find('.', start);
+      const std::string part = key.substr(
+        start, dot == std::string::npos ? std::string::npos : dot - start);
+      if (!node.IsMap() || !node[part]) {
+        fail(key, "is missing");
+        return YAML::Node(YAML::NodeType::Undefined);
+      }
+      node.reset(node[part]);
+      if (dot == std::string::npos) {
+        return node;
+      }
+      start = dot + 1;
+    }
+  }
+
+  double number(const std::string& key)
+  {
+    const YAML::Node node = at(key);
+    double value = 0.0;
+    if (!node.IsDefined()) {
+      return value;
+    }
+    if (!YAML::convert<double>::decode(node, value) || !std::isfinite(value)) {
+      fail(key, "is not a finite number");
+      return 0.0;
+    }
+    return value;
+  }
+
+  std::string text(const std::string& key)
+  {
+    const YAML::Node node = at(key);
+    std::string value;
+    if (!node.IsDefined()) {
+      return value;
+    }
+    if (!YAML::convert<std::string>::decode(node, value) || value.empty()) {
+      fail(key, "is not a non-empty string");
+      return std::string{};
+    }
+    return value;
+  }
+
+  YAML::Node sequence(const std::string& key, std::size_t size)
+  {
+    const YAML::Node node = at(key);
+    if (!node.IsDefined()) {
+      return node;
+    }
+    if (!node.IsSequence() || (size != 0 && node.size() != size)) {
+      fail(key, "is not a sequence of the expected length");
+      return YAML::Node(YAML::NodeType::Undefined);
+    }
+    return node;
+  }
+
+  // One entry of a sequence of mappings, which `at` cannot reach by name.
+  std::string entry_text(const YAML::Node& entry, const std::string& key, const char * name)
+  {
+    std::string value;
+    if (!entry.IsMap() || !entry[name] ||
+      !YAML::convert<std::string>::decode(entry[name], value) || value.empty())
+    {
+      fail(key, "carries an entry whose fields are missing or empty");
+      return std::string{};
+    }
+    return value;
+  }
+
+  double entry_number(const YAML::Node& entry, const std::string& key, const char * name)
+  {
+    double value = 0.0;
+    if (!entry.IsMap() || !entry[name] ||
+      !YAML::convert<double>::decode(entry[name], value) || !std::isfinite(value))
+    {
+      fail(key, "carries an entry whose fields are missing or not finite");
+      return 0.0;
+    }
+    return value;
+  }
+
+private:
+  YAML::Node root_;
+  std::string path_;
+  Status status_{};
+};
+
+}  // namespace
+
+std::string default_path()
+{
+  // The installed copy is what a deployed build has; the source tree is what a
+  // build tree has before `colcon` has installed anything. Both are compiled in
+  // because `crane_model` is ROS-free (contract §6) and there is no ament index
+  // here to ask, and `ModelConfig` is frozen so a caller cannot pass a third.
+  const std::ifstream installed(CRANE_MODEL_HYDRAULICS_YAML_INSTALLED);
+  if (installed.good()) {
+    return CRANE_MODEL_HYDRAULICS_YAML_INSTALLED;
+  }
+  return CRANE_MODEL_HYDRAULICS_YAML_SOURCE;
+}
+
+Status load(const std::string& path, Constants& out)
+{
+  YAML::Node root;
+  try {
+    root = YAML::LoadFile(path);
+  } catch (const std::exception& error) {
+    return Status{
+      ErrorCode::InvalidArgument,
+      "the hydraulic constants could not be read from " + path + ": " + error.what()};
+  }
+  if (!root.IsMap()) {
+    return Status{ErrorCode::InvalidArgument, path + ": the document is not a mapping"};
+  }
+
+  Reader reader(root, path);
+  Constants value;
+  value.r_gear = reader.number("r_gear");
+  value.v_m = reader.number("V_m");
+
+  value.slewing_a_a = reader.number("areas.q1_slewing.A_A");
+  value.boom_a_a = reader.number("areas.q2_boom.A_A");
+  value.boom_a_b = reader.number("areas.q2_boom.A_B");
+  value.arm_a_a = reader.number("areas.q3_arm.A_A");
+  value.arm_a_b = reader.number("areas.q3_arm.A_B");
+  value.telescope_a_a = reader.number("areas.q4_telescope.A_A");
+  value.telescope_a_b = reader.number("areas.q4_telescope.A_B");
+  value.tool_a_a = reader.number("areas.q8_tool.A_A");
+  value.tool_a_b = reader.number("areas.q8_tool.A_B");
+
+  value.boom_ps0_x = reader.number("boom.pS0.x");
+  value.boom_ps0_y = reader.number("boom.pS0.y");
+  value.boom_ps1_x = reader.number("boom.pS1.x");
+  value.boom_ps1_y = reader.number("boom.pS1.y");
+  value.boom_a2 = reader.number("boom.a2");
+  value.boom_ps2_x = reader.number("boom.pS2.x");
+  value.boom_ps2_y = reader.number("boom.pS2.y");
+  value.r13 = reader.number("boom.r13");
+  value.r23 = reader.number("boom.r23");
+
+  value.arm_ps3_x = reader.number("arm.pS3.x");
+  value.arm_ps3_y = reader.number("arm.pS3.y");
+  value.arm_ps3_z = reader.number("arm.pS3.z");
+  value.arm_a3 = reader.number("arm.a3");
+  value.arm_ps4_x = reader.number("arm.pS4.x");
+  value.arm_ps4_y = reader.number("arm.pS4.y");
+  value.arm_ps4_z = reader.number("arm.pS4.z");
+
+  value.jaw_p0 = reader.number("jaw.mirror.p0");
+  value.jaw_p1 = reader.number("jaw.mirror.p1");
+  value.jaw_p2 = reader.number("jaw.mirror.p2");
+  value.jaw_a9 = reader.number("jaw.a9");
+  value.jaw_a10 = reader.number("jaw.a10");
+  value.jaw_a11 = reader.number("jaw.a11");
+  value.jaw_a12 = reader.number("jaw.a12");
+  value.jaw_ps7_x = reader.number("jaw.pS7.x");
+  value.jaw_ps7_y = reader.number("jaw.pS7.y");
+  value.jaw_ps8_x = reader.number("jaw.pS8.x");
+  value.jaw_ps8_y = reader.number("jaw.pS8.y");
+
+  value.eps_abs = reader.number("smoothing.eps_abs");
+  value.eps_v = reader.number("smoothing.eps_v");
+
+  // The canonical eight of contract §2. The first seven are shared and the
+  // eighth is the tool joint, which is the whole of the map's tool dependence.
+  const YAML::Node shared = reader.sequence("joints.shared", kGeneralizedDof - 1);
+  for (std::size_t index = 0; index + 1 < kGeneralizedDof && shared.IsDefined(); ++index) {
+    std::string name;
+    if (!YAML::convert<std::string>::decode(shared[index], name) || name.empty()) {
+      reader.fail("joints.shared", "carries an entry that is not a joint name");
+      break;
+    }
+    value.pzs100_joints[index] = name;
+    value.epsilon7040_joints[index] = name;
+  }
+  value.pzs100_joints[kGeneralizedDof - 1] = reader.text("joints.tool.pzs100");
+  value.epsilon7040_joints[kGeneralizedDof - 1] = reader.text("joints.tool.epsilon7040");
+
+  // The damping table. A reason is mandatory: an override with no recorded
+  // reason is indistinguishable from a typo, and this is the one place in the
+  // model where the description is deliberately contradicted.
+  const YAML::Node overrides = reader.sequence("damping_overrides", 0);
+  if (overrides.IsDefined()) {
+    for (const YAML::Node& entry : overrides) {
+      DampingOverride record;
+      record.joint = reader.entry_text(entry, "damping_overrides", "joint");
+      record.d = reader.entry_number(entry, "damping_overrides", "d");
+      record.reason = reader.entry_text(entry, "damping_overrides", "reason");
+      value.damping_overrides.push_back(std::move(record));
+    }
+  }
+
+  if (!reader.status().ok()) {
+    return reader.status();
+  }
+  out = std::move(value);
+  return Status{};
+}
+
+Status load(Constants& out)
+{
+  return load(default_path(), out);
+}
+
+}  // namespace hydraulics
+
 namespace
 {
 
@@ -47,15 +308,6 @@ template<typename Derived>
 bool finite(const Eigen::MatrixBase<Derived>& value)
 {
   return value.array().isFinite().all();
-}
-
-std::array<std::string, 8> joint_names(Tool tool)
-{
-  return {
-    "theta1_slewing_joint", "theta2_boom_joint", "theta3_arm_joint",
-    "q4_big_telescope", "theta6_tip_joint", "theta7_tilt_joint",
-    "theta8_rotator_joint",
-    tool == Tool::Pzs100 ? "q9_left_rail_joint" : "theta10_outer_jaw_joint"};
 }
 
 bool valid_tool(Tool tool)
@@ -140,7 +392,8 @@ using detail::kPassiveRows;
 // no configuration to raise one at. Here that non-finite ratio is this
 // configuration's `SingularConfiguration`, named per axis; the three constant
 // axes cannot reach it.
-Status fill_cylinder_jacobian(Tool tool, const Q& q, ActuatedJacobian& jacobian)
+Status fill_cylinder_jacobian(
+  const hydraulics::Constants& constants, Tool tool, const Q& q, ActuatedJacobian& jacobian)
 {
   if (!finite(q)) {
     return failure(ErrorCode::NonFiniteInput, "q is not finite");
@@ -154,7 +407,7 @@ Status fill_cylinder_jacobian(Tool tool, const Q& q, ActuatedJacobian& jacobian)
     "the 7040 jaw cylinder is degenerate at this q8"}};
 
   const std::array<double, kActuatedDof> diagonal =
-    cylinder::jacobian_diagonal<double>(tool, q[1], q[2], q[7]);
+    cylinder::jacobian_diagonal<double>(constants, tool, q[1], q[2], q[7]);
   jacobian.setZero();
   for (std::size_t axis = 0; axis < kActuatedDof; ++axis) {
     if (!std::isfinite(diagonal[axis])) {
@@ -603,6 +856,15 @@ Status parse(const ModelConfig& config, SymbolicSource& out)
     return failure(ErrorCode::InvalidArgument, "gravity_m_s2 must be finite and non-zero");
   }
 
+  // Everything the description does not carry, before anything that does: the
+  // canonical joint map is in there, so the description cannot even be walked
+  // until the file has been read. A missing or malformed file fails here, which
+  // is `Model::create` failing, which is what a wrong force limit deserves.
+  Status constants = hydraulics::load(out.constants);
+  if (!constants.ok()) {
+    return constants;
+  }
+
   // The description is parsed twice on purpose. Pinocchio builds the kinematic
   // tree and drops `<mimic>` -- with mimic parsing on it refuses this
   // description outright, because the PZS100 declares the right rail as a mimic
@@ -626,7 +888,7 @@ Status parse(const ModelConfig& config, SymbolicSource& out)
   out.neutral = pinocchio::neutral(out.model);
   out.tool = config.tool;
 
-  const std::array<std::string, kGeneralizedDof> canonical = joint_names(config.tool);
+  const std::array<std::string, kGeneralizedDof>& canonical = out.constants.joints(config.tool);
   for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
     Status status = bind_joint(out.model, canonical[index], out.joints[index]);
     if (!status.ok()) {
@@ -683,11 +945,21 @@ Status parse(const ModelConfig& config, SymbolicSource& out)
       out.damping[static_cast<Eigen::Index>(index)] = joint->dynamics->damping;
     }
   }
-  // Except the telescope. parameters §5 calls its URDF damping a simulation
-  // stability hack an order of magnitude above the identified value and says it
-  // must not enter the model; no identified value is recorded anywhere in the
-  // vault, so the entry is zero rather than a guess. README says so.
-  out.damping[3] = 0.0;
+  // Except where `config/hydraulics.yaml` says otherwise. The override table
+  // is data carrying its own reason, so this loop has no idea that the joint on
+  // it today is the telescope: it applies whatever the file lists, and a table
+  // naming a joint that is not one of the canonical eight is a failure rather
+  // than a line that quietly does nothing.
+  for (const hydraulics::DampingOverride& record : out.constants.damping_overrides) {
+    const auto slot = std::find(canonical.begin(), canonical.end(), record.joint);
+    if (slot == canonical.end()) {
+      return failure(
+        ErrorCode::InvalidArgument,
+        "the damping override for " + record.joint +
+        " names no canonical coordinate of this description");
+    }
+    out.damping[std::distance(canonical.begin(), slot)] = record.d;
+  }
 
   // Where a payload attaches (robot_model §5): the joint that carries
   // K8_rotator_lower_part, and the fixed placement of that link within it.
@@ -766,6 +1038,10 @@ struct Model::Impl
 
   Tool tool{Tool::Pzs100};
   std::array<std::string, 8> names{};
+  // `config/hydraulics.yaml` as `parse` read it. Held rather than consulted
+  // again, because every transmission call below is a real-time one
+  // (contract §10) and reading a file is not.
+  hydraulics::Constants constants{};
   std::array<AxisAreas, kActuatedDof> areas{};
 
   // Built once in create(); every kinematic call below only reads the model and
@@ -1322,8 +1598,9 @@ Result<Model> Model::create(const ModelConfig& config)
   // frame table and the collision geometry -- and the symbolic graph does not.
   auto impl = std::make_unique<Impl>(std::move(source.model));
   impl->tool = source.tool;
-  impl->names = joint_names(source.tool);
-  impl->areas = cylinder::axis_areas();
+  impl->names = source.constants.joints(source.tool);
+  impl->constants = source.constants;
+  impl->areas = cylinder::axis_areas(source.constants);
   impl->joints = source.joints;
   impl->coupled = std::move(source.coupled);
   impl->drives = source.drives;
@@ -1409,8 +1686,11 @@ Tool Model::tool() const noexcept
 
 const std::array<std::string, 8>& Model::urdf_joint_names() const noexcept
 {
-  static const auto fallback = joint_names(Tool::Pzs100);
-  return impl_ ? impl_->names : fallback;
+  // A model with no implementation state never read the file, so it has no
+  // joint map to report. Eight empty strings, rather than one tool's map
+  // written down a second time here for a `Model` that cannot be used anyway.
+  static const std::array<std::string, 8> unread{};
+  return impl_ ? impl_->names : unread;
 }
 
 bool Model::ready() const noexcept
@@ -1424,7 +1704,7 @@ Result<ActuatedJacobian> Model::cylinder_jacobian(const Q& q) const
     return Result<ActuatedJacobian>::failure(not_ready());
   }
   ActuatedJacobian jacobian;
-  Status status = fill_cylinder_jacobian(impl_->tool, q, jacobian);
+  Status status = fill_cylinder_jacobian(impl_->constants, impl_->tool, q, jacobian);
   if (!status.ok()) {
     return Result<ActuatedJacobian>::failure(std::move(status));
   }
@@ -1447,7 +1727,8 @@ Result<CylinderTransmission> Model::transmission(
   }
 
   CylinderTransmission result;
-  status = fill_cylinder_jacobian(impl_->tool, q, result.joint_to_cylinder);
+  status = fill_cylinder_jacobian(
+    impl_->constants, impl_->tool, q, result.joint_to_cylinder);
   if (!status.ok()) {
     return Result<CylinderTransmission>::failure(std::move(status));
   }
@@ -1746,6 +2027,7 @@ Result<SymbolicGraph> Model::symbolic_graph(
   // numeric calls use, and into a copy, so nothing here disturbs a concurrent
   // reader of the model itself.
   detail::SymbolicSource source;
+  source.constants = impl_->constants;
   source.model = impl_->model;
   source.neutral = impl_->neutral;
   source.joints = impl_->joints;

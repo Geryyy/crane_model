@@ -227,13 +227,20 @@ double round_off(double scale)
 // which is a statement about the two smoothings and not a tolerance chosen to
 // make the assertion pass. It collapses to A_max eps -- around 1e-8 m^3/s --
 // once an axis is moving at more than a few millimetres per second.
+//
+// The areas and the two epsilons come out of `config/hydraulics.yaml`, the same
+// file the graph itself read them from, so this bound moves with the file
+// rather than restating what it says.
 double flow_smoothing_bound(std::size_t axis, double velocity)
 {
-  const crane_model::cylinder::AxisAreas areas = crane_model::cylinder::axis_areas()[axis];
+  crane_model::hydraulics::Constants constants;
+  EXPECT_TRUE(crane_model::hydraulics::load(constants).ok());
+  const crane_model::cylinder::AxisAreas areas =
+    crane_model::cylinder::axis_areas(constants)[axis];
   const double largest = std::max(areas.a_eff_pos, areas.a_eff_neg);
   const double step = std::abs(areas.a_eff_pos - areas.a_eff_neg);
-  return largest * crane_model::symbolic::kEpsAbs +
-         0.5 * step * (1.0 - std::tanh(std::abs(velocity) / crane_model::symbolic::kEpsV)) *
+  return largest * constants.eps_abs +
+         0.5 * step * (1.0 - std::tanh(std::abs(velocity) / constants.eps_v)) *
          std::abs(velocity);
 }
 

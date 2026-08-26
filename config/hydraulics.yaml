@@ -1,0 +1,175 @@
+# The constants crane_model needs and the robot description does not carry.
+#
+# Two things read this file, and neither may hold a second copy of a number in
+# it: the C++ `crane_model` reads it in `Model::create` (`src/model.cpp`), and
+# the Python export builds the same dynamics with `pinocchio.casadi` out of the
+# same keys. A constant compiled into one side and typed into the other is
+# exactly the drift this file exists to make impossible, so nothing below
+# appears as a literal in any `.hpp` or `.cpp` of this package -- including the
+# ones the numeric API still needs, because `cylinder_jacobian`, `transmission`
+# and `cylinder_force` are public (model API contract §4). This is sharing, not
+# relocation.
+#
+# Every entry names the section of `wiki/hydraulics.md` it came from. The jaw
+# block is the one exception and says so per entry: §2.6 carries that linkage's
+# equations but none of its numbers, so those are ported from the deployed model
+# under `src/` and name the file they came from instead.
+#
+# Units are SI throughout (`wiki/implementation/style_guide.md` §2). Symbols are
+# the `Code` column of `wiki/nomenclature.md` §7 and §10.
+#
+# A missing or malformed entry is a `Status` failure out of `Model::create`, not
+# a default: a wrong hydraulic constant is a wrong force limit.
+
+# --- the two constant transmissions ------------------------------------------
+r_gear: 0.1        # §6.1, slewing rack-and-pinion radius, m
+V_m: 1.4324e-4     # §6.1, rotator motor volumetric displacement, m^3/rad
+
+# --- chamber areas, §6.1 ------------------------------------------------------
+#
+# The force-producing areas of §4, one entry per hydraulic axis. What each axis
+# does with them -- two cylinders on slewing and on the arm, the regenerative
+# extension of the telescope, V_m in all four slots of the rotator -- is the
+# circuit topology of §2 and §3 and stays in code; only the numbers are here.
+#
+# Slewing carries no A_B because §6.1 states none: its circuit is symmetric and
+# both chambers see the same 2 A_A.
+areas:
+  q1_slewing:
+    A_A: 6.362e-3     # §6.1, m^2
+  q2_boom:
+    A_A: 1.5394e-2    # §6.1, m^2
+    A_B: 9.032e-3     # §6.1, m^2
+  q3_arm:
+    A_A: 6.362e-3     # §6.1, m^2
+    A_B: 2.5133e-3    # §6.1, m^2
+  q4_telescope:
+    A_A: 3.8485e-3    # §6.1, m^2
+    A_B: 2.592e-3     # §6.1, m^2
+  q8_tool:
+    A_A: 7.854e-3     # §6.1, m^2
+    A_B: 4.737e-3     # §6.1, m^2
+
+# --- boom four-bar, §2.2 with the values of §6.2 ------------------------------
+#
+# Every length here except the two bar lengths is also a placement in the real
+# description, and `CraneModelDescription.LinkagePlacementsAgreeWithTheCompiled
+# Constants` asserts that the two agree; a_2 is split from pS2.x so each side of
+# that sum can be checked against the frame that carries it.
+boom:
+  pS0:
+    x: 0.433          # §6.2, cylinder foot on the column, m
+    y: -1.7682        # §6.2, m
+  pS1:
+    x: -0.12          # §6.2, four-bar pivot on the column, m
+    y: -0.07          # §6.2, m
+  a2: 3.49288         # §6.2, theta2 joint to K2_boom, m
+  pS2:
+    x: -3.039         # §6.2, four-bar attachment in K2_boom, m
+    y: -0.036034      # §6.2, m
+  # The description closes this loop only in Gazebo, so neither bar length is a
+  # placement Pinocchio can read back out of it.
+  r13: 0.57           # §6.2, Zugstange, m
+  r23: 0.124          # §6.2, Druckstange, m
+
+# --- arm cylinder, §2.3 with the values of §6.2 -------------------------------
+#
+# The lateral term is pS4.y - pS3.z and not pS4.z - pS3.z, because the two
+# attachment points live in links with different CAD-to-model rotations; see the
+# callout in §2.3 before "normalising" it.
+arm:
+  pS3:
+    x: -1.6802        # §6.2, cylinder foot on the boom, m
+    y: -0.0485        # §6.2, m
+    z: 0.224          # §6.2, m
+  a3: -0.3925         # §6.2, theta3 joint to K3_arm, m
+  pS4:
+    x: 0.274489       # §6.2, cylinder attachment on the arm, m
+    y: 0.224          # §6.2, m
+    z: 0.468          # §6.2, m; the model rotates -pS4.z
+
+# --- 7040 jaw four-bar, §2.6 --------------------------------------------------
+#
+# §6.2 carries none of these numbers, so each names the deployed file it is
+# ported from instead of a section. None of them is a §6.2 value.
+#
+# The tool axis is still an axis of this model: issue 068 took the tool
+# coordinate out of both OCPs, and `Model::cylinder_jacobian`,
+# `Model::transmission` and `Model::cylinder_force` keep it, so the jaw
+# transmission and the §6.1 tool areas above are still evaluated here.
+jaw:
+  # The fitted mirror law phi_sim,9(q8), which §2.6 says is the variant the
+  # deployed model uses, in the Horner form of
+  # timber_crane_model_cpp/include/timber_crane_model_cpp/maple/
+  # comp_eq_four_bar.hpp:7, with jaw_linkage_p of
+  # crane_tools_description/7040/config/gripper_parameter.yaml:13.
+  mirror:
+    p0: -0.121220     # comp_eq_four_bar.hpp:7, quadratic coefficient, 1/rad
+    p1: 1.400122      # comp_eq_four_bar.hpp:7, linear coefficient, -
+    p2: -0.227867     # comp_eq_four_bar.hpp:7, constant term, rad
+  # The two jaw pivots on the pincer frame and the two jaw arm lengths. The
+  # deployed model reads them from the URDF DH transforms in
+  # timber_crane_parameter/src/parameter_def.cpp:196-206; the joint origins are
+  # in crane_tools_description/7040/urdf/links/. Note a9 and a11 are the y and
+  # a10 and a12 the x coordinate of their origin, per the comment there.
+  a9: 0.328           # parameter_def.cpp:196-206, outer pivot, -dh_trans9 y, m
+  a10: 0.8126         # parameter_def.cpp:196-206, outer arm, dh_trans10 x, m
+  a11: 0.336          # parameter_def.cpp:196-206, inner pivot, dh_trans11 y, m
+  a12: 0.8172         # parameter_def.cpp:196-206, inner arm, dh_trans12 x, m
+  # The jaw cylinder's two attachment points. The barrel end sits on the outer
+  # jaw; the rod end sits on the inner jaw and is hard-coded in the deployed
+  # parameter file because the URDF closes that loop only in Gazebo.
+  pS7:
+    x: -0.8971        # gripper_cylinder_joints.urdf.xacro:15, m
+    y: 0.01754        # gripper_cylinder_joints.urdf.xacro:15, m
+  pS8:
+    x: -0.908397      # gripper_parameter.yaml:5-7, m
+    y: 0.015289       # gripper_parameter.yaml:5-7, m
+
+# --- smoothing of constraint 7, wiki/mpc.md §3.1 ------------------------------
+#
+# Applied to the *model* and never to the inner loop's dead-zone compensator.
+# They were compiled into `crane_model/symbolic/casadi_graph.hpp` because
+# `SymbolicGraphSpec` is frozen and carries no place for them; they are here for
+# the same reason as everything else, so the Python export smooths the same way.
+# Both are far below the resolution any axis is commanded at, so the smoothed Q
+# agrees with `Model::transmission`'s to well under a part in 10^6 once |v| is a
+# millimetre per second or more.
+smoothing:
+  eps_abs: 1.0e-6     # mpc §3.1, |v| ~= sqrt(v^2 + eps^2), m/s
+  eps_v: 1.0e-3       # mpc §3.1, the A^{+-} switch scale, m/s
+
+# --- the canonical joint-name map, model API contract §2 ----------------------
+#
+# The canonical eight coordinates as the URDF spells them. Only the eighth is
+# tool-dependent, which is why it is a separate key rather than two full lists:
+# a description that renamed a shared joint would otherwise have to be edited in
+# two places here.
+joints:
+  shared:                      # coordinates 1..7, identical in both descriptions
+    - theta1_slewing_joint
+    - theta2_boom_joint
+    - theta3_arm_joint
+    - q4_big_telescope
+    - theta6_tip_joint
+    - theta7_tilt_joint
+    - theta8_rotator_joint
+  tool:
+    pzs100: q9_left_rail_joint
+    epsilon7040: theta10_outer_jaw_joint
+
+# --- per-joint damping overrides ----------------------------------------------
+#
+# D of `wiki/robot_model.md` §1 is read out of the selected description
+# (`wiki/implementation/parameters.md` §1), which is what gets the per-tool
+# passive entries of §5 right without a table. A joint listed here overrides
+# that reading, with the reason it does; the model applies the table and knows
+# nothing about which joint is on it.
+damping_overrides:
+  - joint: q4_big_telescope
+    d: 0.0
+    reason: >-
+      parameters §5 calls this joint's URDF damping a simulation stability hack
+      an order of magnitude above the identified value and says it must not
+      enter the model. No identified value is recorded anywhere in the vault, so
+      the entry is zero rather than a guess.

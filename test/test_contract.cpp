@@ -32,8 +32,10 @@
 
 // Private to the implementation; on this test's include path only, so the
 // generated collision geometry and the allowed-collision list can be checked
-// against the description and against config/allowed_collisions.srdf.
+// against the description and against config/allowed_collisions.srdf, and so
+// config/hydraulics.yaml can be checked against wiki/hydraulics.md.
 #include "collision_model.hpp"
+#include "cylinder_geometry.hpp"
 
 static_assert(crane_model::Q::RowsAtCompileTime == 8);
 static_assert(crane_model::DQ::RowsAtCompileTime == 8);
@@ -1416,6 +1418,215 @@ TEST(CraneModelDescription, PassiveCoordinatesAreColumnsOfTheToolJacobian)
   const auto root = model.value().jacobian(valid_q(), crane_model::Frame::MountingBase);
   ASSERT_TRUE(root.ok());
   EXPECT_DOUBLE_EQ(root.value().value.norm(), 0.0);
+}
+
+// --- config/hydraulics.yaml carries what the wiki states ---------------------
+//
+// The file is the one statement of every machine constant the description does
+// not carry, and a Python export of this same model reads it too. What makes
+// that safe is this block: it restates wiki/hydraulics.md §6.1 and §6.2 and
+// asserts the file against them, so an edit to the file that contradicts the
+// wiki fails the build rather than silently changing a force limit on one side
+// of the port. These literals are the oracle -- they are the note, written out
+// -- which is why they are the one place in this package a machine constant
+// still appears as a number in C++.
+namespace
+{
+std::string hydraulics_path()
+{
+  return std::string(CRANE_MODEL_CONFIG_DIR) + "/hydraulics.yaml";
+}
+
+crane_model::hydraulics::Constants loaded_constants()
+{
+  crane_model::hydraulics::Constants constants;
+  const crane_model::Status status = crane_model::hydraulics::load(hydraulics_path(), constants);
+  EXPECT_TRUE(status.ok()) << status.message;
+  return constants;
+}
+
+// A copy of the real file with one line replaced, so the malformed cases below
+// differ from the good one by exactly the thing under test.
+std::string write_variant(const std::string& name, const std::string& from, const std::string& to)
+{
+  std::ifstream source(hydraulics_path());
+  std::stringstream buffer;
+  buffer << source.rdbuf();
+  std::string text = buffer.str();
+  const std::size_t at = text.find(from);
+  EXPECT_NE(at, std::string::npos) << "the fixture no longer contains " << from;
+  if (at != std::string::npos) {
+    text.replace(at, from.size(), to);
+  }
+  const std::string path = ::testing::TempDir() + "/" + name;
+  std::ofstream out(path);
+  out << text;
+  return path;
+}
+}  // namespace
+
+TEST(CraneModelHydraulicConstants, TheAreasAreTheOnesSectionSixOneStates)
+{
+  const auto constants = loaded_constants();
+  EXPECT_DOUBLE_EQ(constants.r_gear, 0.1);        // r_g
+  EXPECT_DOUBLE_EQ(constants.v_m, 1.4324e-4);     // V_m
+  EXPECT_DOUBLE_EQ(constants.slewing_a_a, 6.362e-3);
+  EXPECT_DOUBLE_EQ(constants.boom_a_a, 1.5394e-2);
+  EXPECT_DOUBLE_EQ(constants.boom_a_b, 9.032e-3);
+  EXPECT_DOUBLE_EQ(constants.arm_a_a, 6.362e-3);
+  EXPECT_DOUBLE_EQ(constants.arm_a_b, 2.5133e-3);
+  EXPECT_DOUBLE_EQ(constants.telescope_a_a, 3.8485e-3);
+  EXPECT_DOUBLE_EQ(constants.telescope_a_b, 2.592e-3);
+  // The tool axis kept its §6.1 areas when issue 068 took its coordinate out of
+  // the two OCPs: `cylinder_jacobian`, `transmission` and `cylinder_force` are
+  // public (contract §4) and still answer for it.
+  EXPECT_DOUBLE_EQ(constants.tool_a_a, 7.854e-3);
+  EXPECT_DOUBLE_EQ(constants.tool_a_b, 4.737e-3);
+}
+
+TEST(CraneModelHydraulicConstants, TheLinkageGeometryIsTheOneSectionSixTwoStates)
+{
+  const auto constants = loaded_constants();
+  EXPECT_DOUBLE_EQ(constants.boom_ps0_x, 0.433);       // p_S0
+  EXPECT_DOUBLE_EQ(constants.boom_ps0_y, -1.7682);
+  EXPECT_DOUBLE_EQ(constants.boom_ps1_x, -0.12);       // p_S1
+  EXPECT_DOUBLE_EQ(constants.boom_ps1_y, -0.07);
+  EXPECT_DOUBLE_EQ(constants.boom_ps2_x, -3.039);      // p_S2
+  EXPECT_DOUBLE_EQ(constants.boom_ps2_y, -0.036034);
+  EXPECT_DOUBLE_EQ(constants.arm_ps3_x, -1.6802);      // p_S3
+  EXPECT_DOUBLE_EQ(constants.arm_ps3_y, -0.0485);
+  EXPECT_DOUBLE_EQ(constants.arm_ps3_z, 0.224);
+  EXPECT_DOUBLE_EQ(constants.arm_ps4_x, 0.274489);     // p_S4
+  EXPECT_DOUBLE_EQ(constants.arm_ps4_y, 0.224);
+  EXPECT_DOUBLE_EQ(constants.arm_ps4_z, 0.468);
+  EXPECT_DOUBLE_EQ(constants.r13, 0.57);
+  EXPECT_DOUBLE_EQ(constants.r23, 0.124);
+  EXPECT_DOUBLE_EQ(constants.boom_a2, 3.49288);        // a_2
+  EXPECT_DOUBLE_EQ(constants.arm_a3, -0.3925);         // a_3
+  // The three sums the linkages rotate are the model's, not the file's: each
+  // says which frame the numbers above are expressed in.
+  EXPECT_DOUBLE_EQ(constants.boom_link_x(), 3.49288 - 3.039);
+  EXPECT_DOUBLE_EQ(constants.arm_link_x(), -0.3925 + 0.274489);
+  EXPECT_DOUBLE_EQ(constants.arm_link_y(), -0.468);
+  EXPECT_DOUBLE_EQ(constants.arm_lateral_offset(), 0.224 - 0.224);
+}
+
+// §2.6 carries the jaw four-bar's equations and none of its numbers, so these
+// are asserted against the deployed model they were ported from rather than
+// against a section of the wiki.
+TEST(CraneModelHydraulicConstants, TheJawBlockIsTheDeployedModelsAndNamesNoWikiSection)
+{
+  const auto constants = loaded_constants();
+  EXPECT_DOUBLE_EQ(constants.jaw_p0, -0.121220);  // comp_eq_four_bar.hpp:7
+  EXPECT_DOUBLE_EQ(constants.jaw_p1, 1.400122);
+  EXPECT_DOUBLE_EQ(constants.jaw_p2, -0.227867);
+  EXPECT_DOUBLE_EQ(constants.jaw_a9, 0.328);      // parameter_def.cpp:196-206
+  EXPECT_DOUBLE_EQ(constants.jaw_a10, 0.8126);
+  EXPECT_DOUBLE_EQ(constants.jaw_a11, 0.336);
+  EXPECT_DOUBLE_EQ(constants.jaw_a12, 0.8172);
+  EXPECT_DOUBLE_EQ(constants.jaw_ps7_x, -0.8971);
+  EXPECT_DOUBLE_EQ(constants.jaw_ps7_y, 0.01754);
+  EXPECT_DOUBLE_EQ(constants.jaw_ps8_x, -0.908397);
+  EXPECT_DOUBLE_EQ(constants.jaw_ps8_y, 0.015289);
+}
+
+TEST(CraneModelHydraulicConstants, TheSmoothingIsTheOneMpcSectionThreeOneAsksFor)
+{
+  const auto constants = loaded_constants();
+  EXPECT_DOUBLE_EQ(constants.eps_abs, 1.0e-6);
+  EXPECT_DOUBLE_EQ(constants.eps_v, 1.0e-3);
+}
+
+TEST(CraneModelHydraulicConstants, TheJointMapIsToolDependentInItsLastEntryOnly)
+{
+  const auto constants = loaded_constants();
+  const auto& rail = constants.joints(crane_model::Tool::Pzs100);
+  const auto& jaws = constants.joints(crane_model::Tool::Epsilon7040);
+  const std::array<std::string, 7> shared{
+    "theta1_slewing_joint", "theta2_boom_joint", "theta3_arm_joint",
+    "q4_big_telescope", "theta6_tip_joint", "theta7_tilt_joint",
+    "theta8_rotator_joint"};
+  for (std::size_t index = 0; index < shared.size(); ++index) {
+    EXPECT_EQ(rail[index], shared[index]);
+    EXPECT_EQ(jaws[index], shared[index]);
+  }
+  EXPECT_EQ(rail[7], "q9_left_rail_joint");
+  EXPECT_EQ(jaws[7], "theta10_outer_jaw_joint");
+
+  // `MockModel` is a deterministic double with no description and no file to
+  // read (contract §7), so its map really is a second copy. It is a checked
+  // one: a rename in the file that never reached `mock_model.cpp` fails here.
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto mock = crane_model::testing::MockModel::create(tool);
+    ASSERT_TRUE(mock.ok());
+    EXPECT_EQ(mock.value().urdf_joint_names(), constants.joints(tool));
+  }
+}
+
+// The one place the model deliberately contradicts the description. It is a row
+// of a table with its reason attached, not a branch in `parse`, so what this
+// asserts is the row -- and `parse` applies whatever the table holds.
+TEST(CraneModelHydraulicConstants, TheTelescopeDampingOverrideIsDataWithAStatedReason)
+{
+  const auto constants = loaded_constants();
+  ASSERT_EQ(constants.damping_overrides.size(), 1U);
+  const auto& record = constants.damping_overrides.front();
+  EXPECT_EQ(record.joint, "q4_big_telescope");
+  EXPECT_DOUBLE_EQ(record.d, 0.0);
+  EXPECT_NE(record.reason.find("must not enter the model"), std::string::npos)
+    << "the override's reason no longer quotes parameters §5: " << record.reason;
+}
+
+// `Model::create` reads the file. Not a copy of it, not a default: the joint
+// map it reports and the one constant transmission it returns both come out of
+// the same document this test loaded itself.
+TEST(CraneModelHydraulicConstants, ModelCreateReadsTheFileAndNotACompiledCopy)
+{
+  const auto constants = loaded_constants();
+  for (const auto tool : {crane_model::Tool::Pzs100, crane_model::Tool::Epsilon7040}) {
+    const auto model = production_model(tool);
+    ASSERT_TRUE(model.ok()) << model.status().message;
+    EXPECT_EQ(model.value().urdf_joint_names(), constants.joints(tool));
+    const auto jacobian = model.value().cylinder_jacobian(crane_model::Q::Zero());
+    ASSERT_TRUE(jacobian.ok());
+    EXPECT_DOUBLE_EQ(jacobian.value()(0, 0), constants.r_gear);
+  }
+}
+
+TEST(CraneModelHydraulicConstants, AMissingOrMalformedFileIsAFailureAndNotADefault)
+{
+  crane_model::hydraulics::Constants constants;
+
+  const crane_model::Status absent =
+    crane_model::hydraulics::load("/nonexistent/crane_model/hydraulics.yaml", constants);
+  EXPECT_FALSE(absent.ok());
+  EXPECT_EQ(absent.code, crane_model::ErrorCode::InvalidArgument);
+
+  // A key that is gone. The message has to name it, or the person who broke the
+  // file learns only that something in it is wrong.
+  const crane_model::Status missing = crane_model::hydraulics::load(
+    write_variant("hydraulics_missing_key.yaml", "r_gear:", "r_gear_typo:"), constants);
+  EXPECT_FALSE(missing.ok());
+  EXPECT_NE(missing.message.find("r_gear"), std::string::npos) << missing.message;
+
+  // A value that is not a number.
+  const crane_model::Status not_a_number = crane_model::hydraulics::load(
+    write_variant("hydraulics_not_a_number.yaml", "V_m: 1.4324e-4", "V_m: yes"), constants);
+  EXPECT_FALSE(not_a_number.ok());
+  EXPECT_NE(not_a_number.message.find("V_m"), std::string::npos) << not_a_number.message;
+
+  // An override with no reason. The reason is the whole point of the table.
+  const crane_model::Status unexplained = crane_model::hydraulics::load(
+    write_variant("hydraulics_unexplained.yaml", "reason: >-", "unreason: >-"), constants);
+  EXPECT_FALSE(unexplained.ok());
+  EXPECT_NE(unexplained.message.find("damping_overrides"), std::string::npos)
+    << unexplained.message;
+
+  // An override naming a joint that is not one of the canonical eight is
+  // refused by `parse` rather than quietly applying to nothing. That path is
+  // not reachable from here: `ModelConfig` is frozen, so nothing can point
+  // `Model::create` at a variant of the file, and the check is asserted by
+  // reading `parse` rather than by running it.
 }
 
 // --- the constants and the description are cross-checked ---------------------
