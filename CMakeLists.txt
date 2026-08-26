@@ -142,6 +142,17 @@ if(BUILD_TESTING)
     PRIVATE
       CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description")
 
+  # The tool axis in the numeric model, after issue 068 took its coordinate out
+  # of both OCPs. It links the public library alone -- the claim is about
+  # `cylinder_jacobian`, `transmission` and `full_dynamics`, none of which is
+  # symbolic -- and reads the tool joint's own range out of the descriptions.
+  ament_add_gtest(test_tool_axis
+    test/test_tool_axis.cpp)
+  target_link_libraries(test_tool_axis ${PROJECT_NAME})
+  target_compile_definitions(test_tool_axis
+    PRIVATE
+      CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description")
+
   # The recorded-trajectory parity comparison of PRD user story 65. It links
   # the public library and nothing else: the generated model reaches it only
   # through `test/recorded_parity_fixture.txt`, a checked-in table of numbers,
