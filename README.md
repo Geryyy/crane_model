@@ -471,6 +471,49 @@ member to add one to. Pass the same `ModelConfig` that built the `Model`. The
 description is parsed a second time, by the same `detail::parse` `Model::create`
 uses, so it is one implementation invoked twice and not two.
 
+### CasADi is pinned, and this package is where that is checked
+
+**3.7.2**, pinned in `.devcontainer/Dockerfile.vscode` as the `CASADI_VERSION`
+build arg and asserted by `test/test_casadi_version.cpp` against the environment
+the tests are running in. It is checked here because this is where CasADi enters
+the CBS stack: `crane_mpc` and `crane_planning` reach it through
+`crane_model::casadi_graph` and not on their own.
+
+The pin exists for the OCP port. That port's acceptance criterion is that its
+export script regenerates the checked-in C byte-identically on a no-op run, and
+CasADi's code generation is version-sensitive, so an unpinned clone of `master`
+made the criterion unenforceable — a clean checkout on a freshly built image
+produced a dirty diff that said nothing about the model.
+
+The pin has to be a **release tag** rather than a commit, for a reason worth
+knowing before reading a version off this image:
+
+- `casadi.__version__` is not `casadi.CasadiMeta.version()`. Off a release tag
+  CasADi sets `CASADI_IS_RELEASE=0` and appends `+` to the version string, and
+  `casadi/__init__.py` then substitutes `git describe --first-parent`, which on
+  `master` names the last tag *reachable from it* — not the version that was
+  built.
+- So the pre-pin image, which had exactly one CasADi, reported `3.7.2+` through
+  the C++ `CASADI_VERSION_STRING` and `3.6.3-1247.f0e2e2b22` through
+  `casadi.__version__`, out of one `libcasadi.so.3.7`. That looks like two
+  installs and is not one. `CASADI_GIT_REVISION` is the string that settles it:
+  it is unique to a build, where a release number is not.
+
+`test_casadi_version` therefore separates the two failures, because their
+remedies differ:
+
+| Test | Asserts | Remedy when it fails |
+|---|---|---|
+| `TheCppAndPythonHalvesAreOneCasadiBuild` | the header, the linked library and `import casadi` share a version *and a git revision* | remove the second install; a rebuild will not help |
+| `BothSidesReportThePinnedReleaseTag` | both halves report the pinned tag | rebuild the devcontainer image |
+
+The second is **skipped, loudly, while `CASADI_IS_RELEASE` is 0** — that bit
+identifies an unpinned `master` build exactly, and rebuilding the image is a
+human action that cannot be taken from inside the container. It prints every
+reading it took before skipping, because this image's gtest drops the message of
+a `GTEST_SKIP()` from both the console and the JUnit XML. Once the image is
+rebuilt on the pin the skip stops and the assertion is live.
+
 ### It is not a real-time call
 
 Contract §10 lists symbolic-graph creation as non-real-time and this is one.

@@ -155,6 +155,23 @@ if(BUILD_TESTING)
       CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description"
       CRANE_MODEL_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
 
+  # The CasADi pin of `.devcontainer/Dockerfile.vscode`, checked against the
+  # environment the tests are actually running in. It lives in this package
+  # because this is where CasADi enters the CBS stack -- `crane_mpc` and
+  # `crane_planning` reach it through `crane_model::casadi_graph` -- and it
+  # links `casadi::casadi` rather than that target because it asks about the
+  # library and not about the graph.
+  #
+  # Keep this string equal to the `CASADI_VERSION` build arg of the Dockerfile.
+  # The two cannot be derived from one another: the Dockerfile is in the outer
+  # repository and this package has to build standalone.
+  set(CRANE_MODEL_CASADI_PINNED_VERSION "3.7.2")
+  ament_add_gtest(test_casadi_version test/test_casadi_version.cpp)
+  target_link_libraries(test_casadi_version casadi::casadi)
+  target_compile_definitions(test_casadi_version
+    PRIVATE
+      CRANE_MODEL_CASADI_PINNED_VERSION="${CRANE_MODEL_CASADI_PINNED_VERSION}")
+
   add_executable(test_consumer_w04 test/consumer_w04.cpp)
   add_executable(test_consumer_w05 test/consumer_w05.cpp)
   add_executable(test_consumer_w06 test/consumer_w06.cpp)
