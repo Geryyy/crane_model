@@ -592,6 +592,117 @@ parameter, which is the signature contract §9 froze; issue 033's streamed
 payload estimate will want it as a `casadi::SX` parameter instead, and that is a
 contract change under §12.
 
+## The Python symbolic model
+
+`scripts/crane_symbolic.py` is the same dynamics again, in Python. It exists
+because both OCPs are moving to `acados_template`
+(`docs/features/cbs-ocp-python/grill.md` D1), and the cpin model build, the mimic
+projection, the transmission and the output map are common to both — so D8 puts
+them in one importable module rather than in each export script.
+
+Nothing above it is deleted. `crane_model::casadi_graph`, `test_symbolic_graph`
+and both OCPs are untouched and still run; this module stands **beside** the C++
+graph so that the OCP port does not have to debug whether the dynamics are right
+at the same time. Retiring the C++ symbolic path is a later issue.
+
+It is a library. No `main`, no writes, and it imports neither acados nor ROS —
+`export_model_fixture.py --check` asserts that last one, because a parity test
+that needed a solver installed to say whether the dynamics are right would be
+testing the wrong thing.
+
+### The dimensions are the OCPs' and the coordinates are the model's
+
+Both, and it says which everywhere. `q` and `dq` are the canonical eight of
+contract §2; `x` and `u` are what the OCPs plan after issue 068 took the tool
+coordinate out of them — **`nx = 14`, `nu = 5`**. The tool arrives in the
+parameter vector `p` together with the payload body:
+
+| `p` | what |
+|---|---|
+| `p[0]` | the tool coordinate the low-level controller is holding the gripper at |
+| `p[1]` | payload mass |
+| `p[2:5]` | payload centre of mass in K8 |
+| `p[5:11]` | $\Theta_\text{L}$, the six independent entries, in `(xx, xy, xz, yy, yz, zz)` order |
+
+The payload is a **symbol**, not a constant: what it is bound to is the OCP's
+business. That is the difference from `symbolic_graph.cpp`, where contract §9's
+frozen signature bakes it in.
+
+The output map stays **six** axes wide although the OCPs plan five. The tool
+cylinder is still in the model, and reporting what it carries at the pinned
+configuration is how "the transmission did not leave with the coordinate" stays
+something a test can check.
+
+### The parity test is the deliverable
+
+`test/test_symbolic_parity.cpp`. Its oracle is `crane_model`'s **numeric** public
+API and never `symbolic_graph.cpp` or any second copy of the algebra — the
+numeric model survives the port because planner IK, collision and
+`passive_equilibrium` need it, so the oracle does not move.
+
+| Python model | Oracle | Agreement |
+|---|---|---|
+| `mass`, `bias` | `full_dynamics` | `1e-9` relative |
+| $\ddot q_\text{u}$ from `xdot` | passive rows of `inverse_dynamics` at that $\ddot q$ vanish | `1e-6` N m |
+| $\mat M_\text{uu}$, $\mat M_\text{ua}$, $\vec h_\text{u}$ | the same rows of `full_dynamics` | `1e-9` relative |
+| $\vec\tau_\text{a}$ from `z` | $\bar{\mat M}\vec u + \bar{\vec h}$ of `reduced_actuated_dynamics` | `1e-9` relative |
+| $\vec v$ from `z` | `transmission().cylinder_velocity` | `1e-9` relative |
+| $\vec Q$ from `z` | `transmission().pump_flow` | the smoothing bound of §3.1 above |
+| `cylinder_jacobian` | `Model::cylinder_jacobian` | `1e-9` relative |
+| `chamber_force` | `Model::cylinder_force` | `1e-9` relative |
+| $\vec h_\text{u}$ at rest | zero at `passive_equilibrium`'s pose | `1e-6` N m |
+
+Two of its assertions are not about the dynamics and are there because a
+disagreement in them cancels everywhere else:
+
+* **the mimic projection, asserted directly.** Pinocchio drops `<mimic>`, so
+  `q5_small_telescope` and `q11_right_rail_joint` have to be reconstructed by
+  both sides, and a projection error can cancel in a mass matrix. The export
+  writes one function per mimic the description declares, *named after the joint*
+  — so a description that lost one is a missing symbol at link time — and the
+  test compares each against the `<mimic>` element it came from.
+* **the damping override reaches the Python model.** The telescope row must be
+  `0.0` and not the description's `3.4e4`, for the reason `parameters.md` §5
+  gives; every other row must be the description's own number. A faithful URDF
+  read is the *wrong* model here, and it is the one failure that leaves every
+  other quantity plausible.
+
+The spread of points covers configurations, velocities and payloads, and includes
+one per axis where a cylinder geometry is close to degenerate: `q2 = 2.38` is
+0.018 rad from where the boom four-bar stops closing, `q3 = 1.84` is where the
+arm ratio passes through zero, and the 7040's tool coordinate is pinned 0.0023
+rad from the jaw transmission's reversal. One state has every axis at rest, which
+is where mpc §3.1's smoothing is the whole of the difference in $\vec Q$.
+
+### Regenerating the fixture
+
+The Python model reaches the test as **C**. `scripts/export_model_fixture.py`
+code-generates it and the result is checked in, following
+`scripts/derive_collision_model.py` and `test/derive_recorded_parity.py`; the
+test therefore needs no Python interpreter, no acados and not even the CasADi C++
+library — it links `crane_model` and libm.
+
+```bash
+./scripts/export_model_fixture.py            # rewrite test/generated/
+./scripts/export_model_fixture.py --check    # what the suite runs
+```
+
+`--check` regenerates into a temporary directory and compares byte for byte, and
+`export_model_fixture_is_current` is that check in the suite. It is meaningful
+only because CasADi is pinned: code generation is version-sensitive, so when it
+fails it prints **both** CasADi version strings before anything else, and "the
+model changed" is the second explanation to reach for. (The two strings are
+legitimately different on this image and neither is a second install; issue 067's
+notes are the long form.)
+
+`test/generated/` holds two generated files and one hand-written one. The
+generated pair is spelled `.inc` rather than `.c`/`.h` on purpose: every C and
+C++ file here goes through `ament_cpplint` and `ament_cppcheck`, machine output
+fails them by thousands, and reformatting it to pass would make the byte-for-byte
+check compare against whatever the formatter last did. Do not pass those two
+files to `pre-commit` for the same reason. `crane_symbolic_fixture.c` is three
+lines and is what the build compiles.
+
 ## Test fixtures
 
 The mock target is exported only when `BUILD_TESTING=ON`. Deployment builds

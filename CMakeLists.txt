@@ -162,6 +162,43 @@ if(BUILD_TESTING)
     PRIVATE
       CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description")
 
+  # The Python symbolic model of `scripts/crane_symbolic.py`, against the numeric
+  # API. It reaches the build as **C**: `scripts/export_model_fixture.py` runs
+  # CasADi's code generation on the Python model and checks the result into
+  # `test/generated/`, so this comparison needs no Python interpreter, no acados
+  # and no CasADi C++ library -- it links the public library and libm and nothing
+  # else. `test/generated/crane_symbolic_fixture.c` is the one hand-written file
+  # in that directory; it includes the generated text, which is spelled `.inc` so
+  # that the C and C++ linters do not try to review machine output.
+  ament_add_gtest(test_symbolic_parity
+    test/test_symbolic_parity.cpp
+    test/generated/crane_symbolic_fixture.c)
+  target_link_libraries(test_symbolic_parity ${PROJECT_NAME} m)
+  # src/ is on this test's include path for `cylinder_geometry.hpp` alone, so the
+  # smoothing bound it asserts is written in the model's own effective areas;
+  # test/generated/ is there for the generated declarations. Nothing installed
+  # exposes either.
+  target_include_directories(test_symbolic_parity
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/generated)
+  target_compile_definitions(test_symbolic_parity
+    PRIVATE
+      CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description")
+
+  # ...and the other half of that claim: the checked-in C is still what the
+  # Python model generates. It is a separate test because it is a different
+  # failure -- `test_symbolic_parity` says the artefact agrees with the numeric
+  # model, this says the artefact is the current model -- and because it is the
+  # only test in the package that needs a Python interpreter. That interpreter is
+  # required rather than optional: a check that silently disappears when a
+  # dependency is missing is worse than no check, and this is the one that makes
+  # issue 067's CasADi pin mean something.
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME export_model_fixture_is_current
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/export_model_fixture.py --check)
+
   # The tool axis in the numeric model, after issue 068 took its coordinate out
   # of both OCPs. It links the public library alone -- the claim is about
   # `cylinder_jacobian`, `transmission` and `full_dynamics`, none of which is
