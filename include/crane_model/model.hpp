@@ -287,6 +287,40 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
+/// What one cylinder can push and pull at the relief pressure, newtons.
+/**
+ * Two numbers and not one, because a differential cylinder is not symmetric:
+ * `hydraulics.md` §4's `F_i = A_A p_A - A_B p_B` with one chamber at the relief
+ * setting and the other at tank gives a larger extending force than retracting
+ * one. A consumer that needs a symmetric bound takes the smaller of the two.
+ */
+struct CylinderForceLimit
+{
+  double extend{};
+  double retract{};
+
+  /// The symmetric bound: the weaker of the two directions.
+  [[nodiscard]] double symmetric() const noexcept
+  {
+    return extend < retract ? extend : retract;
+  }
+};
+
+/// `F_i^max` per actuated axis, from the model's own chamber areas and a pressure.
+/**
+ * This is a **model** question and lives here for that reason: the chamber areas
+ * are the description's plus `config/hydraulics.yaml`, both of which this package
+ * already holds, so `Model::cylinder_force` is asked rather than a table copied
+ * into a planner or a controller where it would drift.
+ *
+ * `system_pressure_pa` is the one number that cannot be derived and is not
+ * measured -- `wiki/implementation/parameters.md` §7 lists the pressure constants
+ * among its gaps -- so it is an argument and every deployment says where its own
+ * value came from.
+ */
+[[nodiscard]] Result<std::array<CylinderForceLimit, kActuatedDof>>
+derive_cylinder_force_limits(const Model& model, double system_pressure_pa);
+
 }  // namespace crane_model
 
 #endif  // CRANE_MODEL__MODEL_HPP_

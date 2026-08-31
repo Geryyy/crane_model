@@ -1716,6 +1716,54 @@ Result<Vector6> Model::cylinder_force(const ChamberPressure& pressure) const
   return Result<Vector6>::success(force);
 }
 
+Result<std::array<CylinderForceLimit, kActuatedDof>>
+derive_cylinder_force_limits(const Model& model, double system_pressure_pa)
+{
+  using Limits = std::array<CylinderForceLimit, kActuatedDof>;
+  if (!std::isfinite(system_pressure_pa) || !(system_pressure_pa > 0.0)) {
+    return Result<Limits>::failure(
+      failure(
+        ErrorCode::InvalidArgument,
+        "the hydraulic relief pressure must be finite and positive; it is the one number the "
+        "cylinder force limit of robot_model 4.6 cannot be derived from the description and it is "
+        "not measured on this machine (parameters.md 7)"));
+  }
+
+  ChamberPressure pushing;
+  pushing.p_a_pa.setConstant(system_pressure_pa);
+  pushing.p_b_pa.setZero();
+  ChamberPressure pulling;
+  pulling.p_a_pa.setZero();
+  pulling.p_b_pa.setConstant(system_pressure_pa);
+
+  auto push = model.cylinder_force(pushing);
+  if (!push.ok()) {
+    return Result<Limits>::failure(push.status());
+  }
+  auto pull = model.cylinder_force(pulling);
+  if (!pull.ok()) {
+    return Result<Limits>::failure(pull.status());
+  }
+
+  Limits limits{};
+  for (std::size_t row = 0; row < kActuatedDof; ++row) {
+    const double extend = std::abs(push.value()[static_cast<Eigen::Index>(row)]);
+    const double retract = std::abs(pull.value()[static_cast<Eigen::Index>(row)]);
+    if (!std::isfinite(extend) || !(extend > 0.0) ||
+      !std::isfinite(retract) || !(retract > 0.0))
+    {
+      return Result<Limits>::failure(
+        failure(
+          ErrorCode::InvalidArgument,
+          "actuated row " + std::to_string(row) +
+          " has no usable chamber area, so no cylinder force limit follows from the relief "
+          "pressure and constraint 6 of mpc 3 would have no right-hand side there"));
+    }
+    limits[row] = CylinderForceLimit{extend, retract};
+  }
+  return Result<Limits>::success(limits);
+}
+
 // robot_model §2.1: a direct Pinocchio evaluation. `from` is the frame the
 // answer is expressed in and `to` is the frame whose pose is asked for, so
 // `forward_kinematics(q, MountingBase, Tcp)` is the tool pose in K0.
