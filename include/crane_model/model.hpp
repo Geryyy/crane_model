@@ -245,37 +245,6 @@ struct CollisionResult
   Eigen::Vector3d witness_on_other_m{};
 };
 
-struct SymbolicGraphSpec
-{
-  double sample_time_s{0.04};
-  bool include_output_map{true};
-};
-
-class SymbolicGraph
-{
-public:
-  SymbolicGraph(SymbolicGraph&&) noexcept;
-  SymbolicGraph& operator=(SymbolicGraph&&) noexcept;
-  SymbolicGraph(const SymbolicGraph&) = delete;
-  SymbolicGraph& operator=(const SymbolicGraph&) = delete;
-  ~SymbolicGraph();
-
-  [[nodiscard]] std::size_t state_dimension() const noexcept;
-  [[nodiscard]] std::size_t input_dimension() const noexcept;
-  [[nodiscard]] bool has_output_map() const noexcept;
-
-private:
-  struct Impl;
-  explicit SymbolicGraph(std::unique_ptr<Impl> impl) noexcept;
-  SymbolicGraph(
-    std::size_t state_dimension, std::size_t input_dimension,
-    bool has_output_map);
-  std::unique_ptr<Impl> impl_;
-
-  friend class Model;
-  friend class testing::MockModel;
-};
-
 class Model
 {
 public:
@@ -311,9 +280,6 @@ public:
     const Q& q, const CollisionScene& scene) const;
   Result<std::vector<CollisionResult>> collision_queries(
     const Q& q, const CollisionScene& scene) const;
-
-  Result<SymbolicGraph> symbolic_graph(
-    const SymbolicGraphSpec& spec, const Payload& payload) const;
 
 private:
   struct Impl;

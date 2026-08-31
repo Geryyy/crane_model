@@ -2,8 +2,25 @@
 
 ROS-free shared model boundary for the concrete-block crane architecture.
 The public C++17/Eigen API fixes the generalized, actuated, passive, state,
-input, tool, frame, status, dynamics, transmission, collision, and symbolic
-graph contracts.
+input, tool, frame, status, dynamics, transmission and collision contracts. It
+is **numeric only**; the crane's symbolic model is `scripts/crane_symbolic.py`,
+in Python (model API contract §9).
+
+## Updating the checked-in URDF descriptions
+
+The files in `test/description` are expanded fixtures. Generate both of them
+from the current xacros by running this from the workspace root:
+
+```bash
+source install/setup.bash
+ros2 launch crane_model update_test_descriptions.launch.py
+```
+
+The launch file expands
+`epsilon_crane_description/urdf/crane_description.urdf.xacro` once for each
+tool and writes `pzs100.urdf` and `epsilon_7040.urdf` to
+`test/description`. To write to another directory, pass
+`output_dir:=/path/to/output`.
 
 ## What has a backend
 
@@ -14,7 +31,6 @@ graph contracts.
 | `full_dynamics`, `inverse_dynamics`, `reduced_actuated_dynamics` | Pinocchio `crba`, `nonLinearEffects` and `rnea` on the same model |
 | `passive_equilibrium` | Newton on the passive rows of `rnea`, with Pinocchio's gravity Jacobian |
 | `collision_query`, `collision_queries` | Coal, over geometry fitted to the same description |
-| `symbolic_graph` | `BackendUnavailable` at runtime |
 
 `Model::create` parses the description with Pinocchio and maps the canonical
 eight coordinates of contract §2 onto it by their URDF joint names, which keep
@@ -25,7 +41,43 @@ so the wrong tool against the wrong description is caught at construction.
 
 Pinocchio and Coal are *private* implementation details: they appear in no
 public header, and a consumer links the shared libraries without ever seeing
-them (contract §6). CasADi is still absent.
+them (contract §6). There is no CasADi in the C++ at all — see
+**The Python symbolic model** below.
+
+### `config/hydraulics.yaml` — the constants the description does not carry
+
+The URDF is the ground truth for rigid-body dynamics and cannot drift. Four
+things live outside it, and they are in one file rather than in this source:
+
+- the chamber areas, `r_gear` and `V_m` of `wiki/hydraulics.md` §6.1, and the
+  boom and arm linkage geometry of §6.2 — the numbers `cylinder_jacobian`,
+  `transmission` and `cylinder_force` are computed from;
+- the 7040 jaw four-bar of §2.6, whose equations the wiki carries and whose
+  numbers it does not; each entry names the deployed file it was ported from;
+- the per-joint **damping override** table, which is how the telescope entry
+  comes out zero (see **`D`** below);
+- the canonical joint-name map of contract §2, and the two smoothing constants
+  `wiki/mpc.md` §3.1 asks of the symbolic model.
+
+They are a file because a Python export of this same model — `pinocchio.casadi`
+over the same URDF — needs every one of them and would otherwise be *told* them
+a second time. A constant compiled in here and typed in there is drift nothing
+would catch, so nothing above appears as a literal in any `.hpp` or `.cpp` of
+this package. `test_contract.cpp` restates `wiki/hydraulics.md` §6.1 and §6.2
+and asserts the file against them, so an edit to the file that contradicts the
+wiki fails the build.
+
+`Model::create` reads it first, before it touches the description — the joint
+map is in there, so there is nothing to walk until it has been read. A missing
+file, a missing key, a key that is not a number and a damping override with no
+stated reason are each `InvalidArgument` naming the key: never a default,
+because a hydraulic constant that quietly fell back to zero is a force limit
+that quietly fell back to zero.
+
+The path is compiled in, the installed copy first and the source tree second.
+This package is ROS-free, so there is no ament index to ask, and `ModelConfig`
+is frozen, so a caller cannot pass a third. yaml-cpp does the parsing
+(`wiki/implementation/libraries.md`); it brings no ROS with it.
 
 ### Frames
 
@@ -96,10 +148,13 @@ recorded-trajectory parity campaign is for.
   `wiki/implementation/parameters.md` §1 and §5 — which is also what makes the
   passive damping tool-dependent without a table in this file, since the two
   descriptions carry §5's hand-tuned per-tool values. Two deliberate departures:
-  - **the telescope entry is zero.** §5 calls the URDF's `3.4e4` a simulation
-    stability hack an order of magnitude above the identified value and says it
-    must not enter the model. No identified value is recorded anywhere in the
-    vault, so the entry is zero rather than a guess.
+  - **the telescope entry is zero**, and it is zero because
+    `config/hydraulics.yaml` says so. `damping_overrides` is a table of
+    `{joint, d, reason}`; `parse` applies whatever is on it and knows nothing
+    about which joint that is. The row's own reason is §5's: the URDF's `3.4e4`
+    is a simulation stability hack an order of magnitude above the identified
+    value and must not enter the model, and no identified value is recorded
+    anywhere in the vault, so the entry is zero rather than a guess.
   - **the mimicked joints' own damping is not added.** §5 tabulates damping per
     machine axis, and the mirrored rail's entry is the same simulation number
     duplicated for Gazebo; adding it would silently double the PZS100 tool axis
@@ -375,6 +430,120 @@ it. §4.3 prescribes inflating the geometry; this note is a deliberate departure
 because inflation cannot be expressed through the frozen API and the two
 alternatives above are exactly as tight.
 
+## The Python symbolic model
+
+`scripts/crane_symbolic.py` states the crane's dynamics symbolically, in Python.
+It exists because both OCPs moved to `acados_template`
+(`docs/features/cbs-ocp-python/grill.md` D1), and the cpin model build, the mimic
+projection, the transmission and the output map are common to both — so D8 puts
+them in one importable module rather than in each export script.
+
+It is now the **only** statement of the crane's symbolic model. It arrived
+beside the C++ `crane_model::casadi_graph` so that the OCP port did not have to
+debug whether the dynamics were right at the same time; with `crane_mpc` and
+`crane_planning` both ported, that target, its `symbolic/` include root,
+`src/symbolic_graph.{hpp,cpp}` and `test_symbolic_graph` are gone, and the
+package declares no CasADi C++ dependency. Contract §9 records the arrangement
+that replaced them.
+
+It is a library. No `main`, no writes, and it imports neither acados nor ROS —
+`export_model_fixture.py --check` asserts that last one, because a parity test
+that needed a solver installed to say whether the dynamics are right would be
+testing the wrong thing.
+
+### The dimensions are the OCPs' and the coordinates are the model's
+
+Both, and it says which everywhere. `q` and `dq` are the canonical eight of
+contract §2; `x` and `u` are what the OCPs plan after issue 068 took the tool
+coordinate out of them — **`nx = 14`, `nu = 5`**. The tool arrives in the
+parameter vector `p` together with the payload body:
+
+| `p` | what |
+|---|---|
+| `p[0]` | the tool coordinate the low-level controller is holding the gripper at |
+| `p[1]` | payload mass |
+| `p[2:5]` | payload centre of mass in K8 |
+| `p[5:11]` | $\Theta_\text{L}$, the six independent entries, in `(xx, xy, xz, yy, yz, zz)` order |
+
+The payload is a **symbol**, not a constant: what it is bound to is the OCP's
+business. That is the difference from the retired `symbolic_graph.cpp`, whose
+frozen signature baked it in.
+
+The output map stays **six** axes wide although the OCPs plan five. The tool
+cylinder is still in the model, and reporting what it carries at the pinned
+configuration is how "the transmission did not leave with the coordinate" stays
+something a test can check.
+
+### The parity test is the deliverable
+
+`test/test_symbolic_parity.cpp`. Its oracle is `crane_model`'s **numeric** public
+API and never a second copy of the algebra — the numeric model survives the
+port because planner IK, collision and `passive_equilibrium` need it, so the
+oracle does not move.
+
+| Python model | Oracle | Agreement |
+|---|---|---|
+| `mass`, `bias` | `full_dynamics` | `1e-9` relative |
+| $\ddot q_\text{u}$ from `xdot` | passive rows of `inverse_dynamics` at that $\ddot q$ vanish | `1e-6` N m |
+| $\mat M_\text{uu}$, $\mat M_\text{ua}$, $\vec h_\text{u}$ | the same rows of `full_dynamics` | `1e-9` relative |
+| $\vec\tau_\text{a}$ from `z` | $\bar{\mat M}\vec u + \bar{\vec h}$ of `reduced_actuated_dynamics` | `1e-9` relative |
+| $\vec v$ from `z` | `transmission().cylinder_velocity` | `1e-9` relative |
+| $\vec Q$ from `z` | `transmission().pump_flow` | the derived smoothing bound of `wiki/mpc.md` §3.1 |
+| `cylinder_jacobian` | `Model::cylinder_jacobian` | `1e-9` relative |
+| `chamber_force` | `Model::cylinder_force` | `1e-9` relative |
+| $\vec h_\text{u}$ at rest | zero at `passive_equilibrium`'s pose | `1e-6` N m |
+
+Two of its assertions are not about the dynamics and are there because a
+disagreement in them cancels everywhere else:
+
+* **the mimic projection, asserted directly.** Pinocchio drops `<mimic>`, so
+  `q5_small_telescope` and `q11_right_rail_joint` have to be reconstructed by
+  both sides, and a projection error can cancel in a mass matrix. The export
+  writes one function per mimic the description declares, *named after the joint*
+  — so a description that lost one is a missing symbol at link time — and the
+  test compares each against the `<mimic>` element it came from.
+* **the damping override reaches the Python model.** The telescope row must be
+  `0.0` and not the description's `3.4e4`, for the reason `parameters.md` §5
+  gives; every other row must be the description's own number. A faithful URDF
+  read is the *wrong* model here, and it is the one failure that leaves every
+  other quantity plausible.
+
+The spread of points covers configurations, velocities and payloads, and includes
+one per axis where a cylinder geometry is close to degenerate: `q2 = 2.38` is
+0.018 rad from where the boom four-bar stops closing, `q3 = 1.84` is where the
+arm ratio passes through zero, and the 7040's tool coordinate is pinned 0.0023
+rad from the jaw transmission's reversal. One state has every axis at rest, which
+is where mpc §3.1's smoothing is the whole of the difference in $\vec Q$.
+
+### Regenerating the fixture
+
+The Python model reaches the test as **C**. `scripts/export_model_fixture.py`
+code-generates it and the result is checked in, following
+`scripts/derive_collision_model.py` and `test/derive_recorded_parity.py`; the
+test therefore needs no Python interpreter, no acados and not even the CasADi C++
+library — it links `crane_model` and libm.
+
+```bash
+./scripts/export_model_fixture.py            # rewrite test/generated/
+./scripts/export_model_fixture.py --check    # what the suite runs
+```
+
+`--check` regenerates into a temporary directory and compares byte for byte, and
+`export_model_fixture_is_current` is that check in the suite. CasADi's code
+generation is **version-sensitive** and the image's CasADi is not pinned, so when
+it fails it prints both CasADi version strings before anything else, and "the
+model changed" is the second explanation to reach for. (The C++ and Python
+version strings are legitimately different on this image and neither is a second
+install; issue 067's notes are the long form.)
+
+`test/generated/` holds two generated files and one hand-written one. The
+generated pair is spelled `.inc` rather than `.c`/`.h` on purpose: every C and
+C++ file here goes through `ament_cpplint` and `ament_cppcheck`, machine output
+fails them by thousands, and reformatting it to pass would make the byte-for-byte
+check compare against whatever the formatter last did. Do not pass those two
+files to `pre-commit` for the same reason. `crane_symbolic_fixture.c` is three
+lines and is what the build compiles.
+
 ## Test fixtures
 
 The mock target is exported only when `BUILD_TESTING=ON`. Deployment builds
@@ -386,8 +555,8 @@ test builds real models from, one per tool. They are generated, never
 hand-edited; each file's header carries the `xacro` command that produced it.
 Regenerate them when `epsilon_crane_description` or a tool description changes —
 `LinkagePlacementsAgreeWithTheCompiledConstants` and
-`CylinderTransmissionFollowsTheDescriptionsGeometry` then say whether the
-hydraulic subset's compiled-in geometry still agrees with the description, and
+`CylinderTransmissionFollowsTheDescriptionsGeometry` then say whether
+`config/hydraulics.yaml`'s linkage geometry still agrees with the description, and
 `PrimitivesWereFittedToThisDescription` says the same for the collision fit.
 When it fails, re-run the derivation rather than editing the fit:
 
@@ -415,6 +584,43 @@ torque algorithm being asked, and the reduction of §3.4 is recovered from
 `inverse_dynamics` alone by solving its passive rows to zero. If one of them
 fails, the disagreement is with the description, not with a transcription of the
 same algebra.
+
+### Parity with the generated model
+
+`test/test_recorded_parity.cpp` compares this backend against the Maple/MATLAB
+model of `src/matlab_codegen/mp_crane` at 64 configurations taken out of the
+2026-08-19 machine recordings. It is PRD user story 65's evidence for retiring
+that model, and the full write-up — the residuals, the two defects it found and
+what the result licenses — is `wiki/robot_model.md` §6.
+
+The fixture is `test/recorded_parity_fixture.txt`: the 64 configurations, and
+the generated model's answers beside them, with the bag and topic of every
+column in its header. `test/derive_recorded_parity.py` produced it once, by
+hand, and `test/mp_crane_reference.cpp` is the evaluator that script compiles
+and runs. **Neither is part of the build**: nothing in `CMakeLists.txt` or
+`package.xml` names `mp_crane`, and the test links only `crane_model`. That is
+deliberate — the generated model reaches this directory as a checked-in table of
+numbers and by no other route, which is what lets the slice-4 retirement guard
+assert its absence from the `hardware` closure while the validation against it
+survives. Regenerating the fixture needs the recordings mounted and the retained
+stack built, and is not something CI can or should do:
+
+```bash
+python3 test/derive_recorded_parity.py \
+  --description test/description/pzs100.urdf \
+  --recordings /home/vscode/Documents/control_recordings \
+  --output test/recorded_parity_fixture.txt
+```
+
+The comparison is a ladder, not a tolerance. Forward kinematics and the passive
+equilibrium agree to machine precision. The passive rows of `M` and the bias do
+not, by 50 % — and the test evaluates this model three times, on the description
+as checked in, on the description without the 200 kg rail gripper the generated
+model does not carry, and on that with the tool frame moved down by the 48.7 mm
+the generated model drops, where the two agree to 1e-4. Each rung names one
+defect in the retired model; nothing is rounded away, and a change that made
+this model agree with the generated one on the description as written fails the
+first test in the file.
 
 Build this package in the integration workspace so Eigen and retained
 dependencies are available:

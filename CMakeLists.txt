@@ -3,12 +3,17 @@ project(crane_model)
 
 find_package(ament_cmake REQUIRED)
 find_package(Eigen3 REQUIRED)
+include(cmake/boost_python310_headers.cmake)
 find_package(pinocchio REQUIRED)
 # Coal is used directly, not through Pinocchio: the Pinocchio in this image is
 # built without its collision module (no `pinocchio/collision`, no
 # PINOCCHIO_WITH_COLLISION), so `pinocchio::GeometryModel` carries a fake
 # geometry. Pinocchio still places the links; Coal answers the queries.
 find_package(coal REQUIRED)
+# config/hydraulics.yaml is read in `Model::create`. yaml-cpp is the parser
+# wiki/implementation/libraries.md lists for configuration outside the parameter
+# system; it brings no ROS with it, so contract §6 still holds.
+find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} src/model.cpp)
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
@@ -25,11 +30,31 @@ target_include_directories(${PROJECT_NAME}
 set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(${PROJECT_NAME}
   PUBLIC Eigen3::Eigen
-  PRIVATE pinocchio::pinocchio coal::coal)
+  PRIVATE pinocchio::pinocchio coal::coal yaml-cpp)
+
+# Where `hydraulics::default_path` looks for config/hydraulics.yaml. Two
+# candidates rather than one because the library is ROS-free (contract §6) and
+# has no ament index to ask, and `ModelConfig` is frozen so a caller cannot
+# hand it a third: the installed copy is what a deployed build reads, and the
+# source tree is what a build tree reads before anything has been installed.
+target_compile_definitions(${PROJECT_NAME}
+  PRIVATE
+    CRANE_MODEL_HYDRAULICS_YAML_INSTALLED="${CMAKE_INSTALL_PREFIX}/share/${PROJECT_NAME}/config/hydraulics.yaml"
+    CRANE_MODEL_HYDRAULICS_YAML_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/config/hydraulics.yaml")
+
 
 install(
   DIRECTORY include/
   DESTINATION include)
+# The shared constants themselves, not just the code that reads them: this is
+# the copy `hydraulics::default_path` prefers and the copy the Python export
+# will read out of an installed workspace.
+install(
+  DIRECTORY config
+  DESTINATION share/${PROJECT_NAME})
+install(
+  DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME})
 install(
   TARGETS ${PROJECT_NAME}
   EXPORT export_${PROJECT_NAME}
@@ -42,64 +67,25 @@ install(
   DESTINATION share/${PROJECT_NAME}/cmake)
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
-ament_export_dependencies(Eigen3 pinocchio coal)
+ament_export_dependencies(Eigen3 pinocchio coal yaml-cpp)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
-  # This target is installed only with BUILD_TESTING=ON, so normal deployment
-  # builds omit the test fixture and its target from the prefix.
-  add_library(${PROJECT_NAME}_mock_model
-    test_support/src/mock_model.cpp)
-  add_library(${PROJECT_NAME}::mock_model ALIAS ${PROJECT_NAME}_mock_model)
-  target_compile_features(${PROJECT_NAME}_mock_model PUBLIC cxx_std_17)
-  target_include_directories(${PROJECT_NAME}_mock_model
-    PUBLIC
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/test_support/include>
-      $<INSTALL_INTERFACE:include>)
-  target_link_libraries(${PROJECT_NAME}_mock_model
-    PUBLIC ${PROJECT_NAME} Eigen3::Eigen)
-  set_target_properties(${PROJECT_NAME}_mock_model
-    PROPERTIES EXPORT_NAME mock_model)
-  install(
-    DIRECTORY test_support/include/
-    DESTINATION include)
-  install(
-    TARGETS ${PROJECT_NAME}_mock_model
-    EXPORT export_${PROJECT_NAME}
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin)
-
-  # The contract test loads the real machine description, so it needs the
-  # checked-in fixtures, and it reads the linkage placements back out of them
-  # with Pinocchio to cross-check the compiled-in cylinder geometry. That second
-  # use is the only reason a test here links Pinocchio directly; nothing that
-  # merely *uses* the model API may.
-  ament_add_gtest(test_contract
-    test/test_contract.cpp)
-  target_link_libraries(test_contract ${PROJECT_NAME}::mock_model pinocchio::pinocchio)
-  # src/ is on the test's include path for `collision_model.hpp` alone: the
-  # generated geometry and the allowed-collision list are compiled into the
-  # library, and the test is what ties them back to the description and to
-  # config/allowed_collisions.srdf. Nothing installed exposes that header.
-  target_include_directories(test_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  target_compile_definitions(test_contract
+  # The recorded-trajectory parity comparison of PRD user story 65, and the only
+  # gtest left in this package: it is the one statement in the workspace that
+  # ties a chamber area or a damping number to the real machine. It links the
+  # public library and nothing else -- the fixture reaches it as
+  # `test/recorded_parity_fixture.txt`, a checked-in table of numbers derived
+  # from the 2026-08-19 recordings by `test/derive_recorded_parity.py`, so the
+  # comparison needs neither a bag nor ROS.
+  ament_add_gtest(test_recorded_parity
+    test/test_recorded_parity.cpp)
+  target_link_libraries(test_recorded_parity ${PROJECT_NAME})
+  target_compile_definitions(test_recorded_parity
     PRIVATE
       CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description"
-      CRANE_MODEL_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config")
-
-  add_executable(test_consumer_w04 test/consumer_w04.cpp)
-  add_executable(test_consumer_w05 test/consumer_w05.cpp)
-  add_executable(test_consumer_w06 test/consumer_w06.cpp)
-  add_executable(test_consumer_w07 test/consumer_w07.cpp)
-  add_executable(test_consumer_w08 test/consumer_w08.cpp)
-  foreach(consumer IN ITEMS
-      test_consumer_w04 test_consumer_w05 test_consumer_w06
-      test_consumer_w07 test_consumer_w08)
-    target_link_libraries(${consumer} PRIVATE ${PROJECT_NAME}::mock_model)
-    add_test(NAME ${consumer} COMMAND ${consumer})
-  endforeach()
+      CRANE_MODEL_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
 endif()
 
-ament_package()
+ament_package(CONFIG_EXTRAS "cmake/boost_python310_headers.cmake")

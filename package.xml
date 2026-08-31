@@ -2,7 +2,7 @@
 <package format="3">
   <name>crane_model</name>
   <version>0.1.0</version>
-  <description>ROS-free frozen crane model API and deterministic test double.</description>
+  <description>ROS-free frozen crane model API.</description>
   <maintainer email="maintainers@example.invalid">Architecture maintainers</maintainer>
   <license>Apache-2.0</license>
 
@@ -11,6 +11,16 @@
   <exec_depend>eigen</exec_depend>
   <depend>pinocchio</depend>
   <depend>coal</depend>
+  <!-- config/hydraulics.yaml, read in Model::create. Listed for "configuration
+       outside the parameter system" in wiki/implementation/libraries.md; it is
+       a parser, not ROS, so the package stays ROS-free. -->
+  <depend>yaml-cpp</depend>
+  <!-- The library remains ROS-free; these are only for the URDF update launch. -->
+  <exec_depend>epsilon_7040_description</exec_depend>
+  <exec_depend>epsilon_crane_description</exec_depend>
+  <exec_depend>pzs100_description</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+  <exec_depend>xacro</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
