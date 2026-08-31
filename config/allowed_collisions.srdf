@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The allowed-collision list of wiki/trajectory_planning.md 4.2.
+
+     Derived once, by scripts/derive_collision_model.py, from:
+       pzs100: test/description/pzs100.urdf
+       7040: test/description/epsilon_7040.urdf
+     and from the primitive fit that same script produces, which is the
+     geometry this list filters. It is not read at runtime, because
+     crane_model is ROS-free and takes no file path, but it is the
+     checked-in artefact, and CraneModelCollision.AllowedPairsAreTheCheckedInList
+     asserts that the table compiled into src/model.cpp is exactly these pairs.
+
+     Reasons, as the MoveIt format uses them: Adjacent, no third shaped link
+     between the two; Never, no sampled configuration brought them together;
+     Always, every sampled configuration had them overlapping; Default, they
+     overlap at the neutral configuration. A pair is disabled only when every
+     tool that carries both links disabled it. -->
+<robot name="crane_model">
+    <disable_collisions link1="K0_mounting_base" link2="K1_slewing_column" reason="Adjacent"/>
+    <disable_collisions link1="K0_mounting_base" link2="control_box" reason="Never"/>
+    <disable_collisions link1="K0_mounting_base" link2="control_box_sensor_mount" reason="Never"/>
+    <disable_collisions link1="K0_mounting_base" link2="hydraulic_block" reason="Never"/>
+    <disable_collisions link1="K10_left_rail" link2="K12_right_rail" reason="Always"/>
+    <disable_collisions link1="K10_left_rail" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K10_left_rail" link2="K7_rotator_upper_part" reason="Default"/>
+    <disable_collisions link1="K10_left_rail" link2="K8_rotator_lower_part" reason="Default"/>
+    <disable_collisions link1="K10_left_rail" link2="K8_tool_center_point" reason="Adjacent"/>
+    <disable_collisions link1="K10_outer_jaw" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K10_outer_jaw" link2="K7_rotator_upper_part" reason="Never"/>
+    <disable_collisions link1="K10_outer_jaw" link2="K8_rotator_lower_part" reason="Never"/>
+    <disable_collisions link1="K10_outer_jaw" link2="K8_tool_center_point" reason="Adjacent"/>
+    <disable_collisions link1="K12_inner_jaw" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K12_inner_jaw" link2="K7_rotator_upper_part" reason="Never"/>
+    <disable_collisions link1="K12_inner_jaw" link2="K8_rotator_lower_part" reason="Never"/>
+    <disable_collisions link1="K12_inner_jaw" link2="K8_tool_center_point" reason="Adjacent"/>
+    <disable_collisions link1="K12_right_rail" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K12_right_rail" link2="K7_rotator_upper_part" reason="Default"/>
+    <disable_collisions link1="K12_right_rail" link2="K8_rotator_lower_part" reason="Default"/>
+    <disable_collisions link1="K12_right_rail" link2="K8_tool_center_point" reason="Adjacent"/>
+    <disable_collisions link1="K1_slewing_column" link2="K2_boom" reason="Adjacent"/>
+    <disable_collisions link1="K1_slewing_column" link2="K4_outer_telescope" reason="Never"/>
+    <disable_collisions link1="K1_slewing_column" link2="control_box" reason="Adjacent"/>
+    <disable_collisions link1="K1_slewing_column" link2="control_box_sensor_mount" reason="Always"/>
+    <disable_collisions link1="K1_slewing_column" link2="hydraulic_block" reason="Adjacent"/>
+    <disable_collisions link1="K2_boom" link2="K3_arm" reason="Adjacent"/>
+    <disable_collisions link1="K2_boom" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K2_boom" link2="K7_rotator_upper_part" reason="Never"/>
+    <disable_collisions link1="K2_boom" link2="K8_rotator_lower_part" reason="Never"/>
+    <disable_collisions link1="K2_boom" link2="control_box" reason="Never"/>
+    <disable_collisions link1="K2_boom" link2="control_box_sensor_mount" reason="Default"/>
+    <disable_collisions link1="K2_boom" link2="hydraulic_block" reason="Never"/>
+    <disable_collisions link1="K3_arm" link2="K4_outer_telescope" reason="Adjacent"/>
+    <disable_collisions link1="K3_arm" link2="K5_inner_telescope" reason="Default"/>
+    <disable_collisions link1="K3_arm" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K3_arm" link2="control_box" reason="Never"/>
+    <disable_collisions link1="K3_arm" link2="control_box_sensor_mount" reason="Never"/>
+    <disable_collisions link1="K3_arm" link2="hydraulic_block" reason="Never"/>
+    <disable_collisions link1="K4_outer_telescope" link2="K5_inner_telescope" reason="Adjacent"/>
+    <disable_collisions link1="K4_outer_telescope" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K4_outer_telescope" link2="K7_rotator_upper_part" reason="Never"/>
+    <disable_collisions link1="K4_outer_telescope" link2="control_box" reason="Never"/>
+    <disable_collisions link1="K4_outer_telescope" link2="control_box_sensor_mount" reason="Never"/>
+    <disable_collisions link1="K5_inner_telescope" link2="K6_double_joint_link" reason="Adjacent"/>
+    <disable_collisions link1="K5_inner_telescope" link2="control_box" reason="Never"/>
+    <disable_collisions link1="K5_inner_telescope" link2="control_box_sensor_mount" reason="Never"/>
+    <disable_collisions link1="K6_double_joint_link" link2="K7_rotator_upper_part" reason="Adjacent"/>
+    <disable_collisions link1="K6_double_joint_link" link2="K8_rotator_lower_part" reason="Never"/>
+    <disable_collisions link1="K6_double_joint_link" link2="K8_tool_center_point" reason="Never"/>
+    <disable_collisions link1="K6_double_joint_link" link2="control_box" reason="Never"/>
+    <disable_collisions link1="K6_double_joint_link" link2="control_box_sensor_mount" reason="Never"/>
+    <disable_collisions link1="K6_double_joint_link" link2="hydraulic_block" reason="Never"/>
+    <disable_collisions link1="K7_rotator_upper_part" link2="K8_rotator_lower_part" reason="Adjacent"/>
+    <disable_collisions link1="K7_rotator_upper_part" link2="K8_tool_center_point" reason="Never"/>
+    <disable_collisions link1="K7_rotator_upper_part" link2="control_box" reason="Never"/>
+    <disable_collisions link1="K7_rotator_upper_part" link2="control_box_sensor_mount" reason="Never"/>
+    <disable_collisions link1="K7_rotator_upper_part" link2="hydraulic_block" reason="Never"/>
+    <disable_collisions link1="K8_rotator_lower_part" link2="K8_tool_center_point" reason="Adjacent"/>
+    <disable_collisions link1="K8_rotator_lower_part" link2="control_box" reason="Never"/>
+    <disable_collisions link1="K8_rotator_lower_part" link2="control_box_sensor_mount" reason="Never"/>
+    <disable_collisions link1="control_box" link2="control_box_sensor_mount" reason="Adjacent"/>
+    <disable_collisions link1="control_box" link2="hydraulic_block" reason="Never"/>
+    <disable_collisions link1="control_box_sensor_mount" link2="hydraulic_block" reason="Never"/>
+</robot>
