@@ -169,7 +169,13 @@ class CraneModel:
         pin.forwardKinematics(
             self._model, self._data, self._description.configuration(q)
         )
-        pin.updateFramePlacements(self._model, self._data)
+        # The two frames asked for, not all of them: `updateFramePlacements`
+        # refreshes every frame the description carries (130 on the PZS100) and
+        # this is the inner loop of the planner's inverse kinematics. `Model::
+        # pose` in src/model.cpp has always done it this way; this is Python
+        # catching up, not a new decision.
+        pin.updateFramePlacement(self._model, self._data, source)
+        pin.updateFramePlacement(self._model, self._data, target)
         relative = self._data.oMf[source].actInv(self._data.oMf[target])
         return Pose(frm, np.array(relative.translation), pin.SE3ToXYZQUAT(relative)[3:])
 

@@ -222,8 +222,14 @@ def queries(model, data, geometry: LinkGeometry, configuration, scene) -> list:
     """
     validate_scene(scene)
     pin.forwardKinematics(model, data, configuration)
-    pin.updateFramePlacements(model, data)
-    base = data.oMf[model.getFrameId(Frame.MOUNTING_BASE.value)]
+    # Only the base and the frames that carry a body, as `Model::place_bodies`
+    # in src/model.cpp does: the machine has far more frames than fitted
+    # primitives, and every one of them is refreshed on every query otherwise.
+    base_frame = model.getFrameId(Frame.MOUNTING_BASE.value)
+    pin.updateFramePlacement(model, data, base_frame)
+    for _, frame, _, _ in geometry.bodies:
+        pin.updateFramePlacement(model, data, frame)
+    base = data.oMf[base_frame]
     placed = [
         (link, shape, base.actInv(data.oMf[frame]) * offset)
         for link, frame, shape, offset in geometry.bodies
