@@ -1,0 +1,319 @@
+# GENERATED from src/collision_model.hpp -- never hand-edited.
+#
+# The fitted collision geometry of the machine and the self pairs not worth
+# checking, both derived by scripts/derive_collision_model.py from the
+# descriptions under test/description/ and the meshes they name. The C++
+# library compiles the same table in because it is ROS-free and cannot resolve
+# a package:// mesh URI; Python reads it from here.
+#
+# A capsule lies along its own z: extents are {radius, half length}. A box
+# carries its three half sides. Both are in the frame of their link.
+
+primitives:
+  - tool: epsilon7040
+    link: K0_mounting_base
+    shape: box
+    extents_m: [2.266948, 0.797056, 0.408198]
+    origin_m: [-0.143463, 0.349672, -0.223394]
+    orientation_xyzw: [0.453228552, -0.459227828, -0.538705081, 0.541747651]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_mounting_base.stl@0.001,0.001,0.001"
+    source_pose: [-0.315000000, 0.350000000, 0.148500000, 1.570796327, 0.000000000, 0.000000000]
+  - tool: epsilon7040
+    link: K10_outer_jaw
+    shape: box
+    extents_m: [0.302021, 0.467017, 0.190695]
+    origin_m: [-0.424341, -0.120811, -0.000028]
+    orientation_xyzw: [-0.548785083, 0.445304830, 0.491952260, 0.508450111]
+    source: "mesh:package://epsilon_7040_description/meshes/collision_outer_jaw.stl@0.001,0.001,0.001"
+    source_pose: [-0.836380000, -0.113370000, 0.000000000, 0.000000000, 0.000000000, -0.328296427]
+  - tool: epsilon7040
+    link: K12_inner_jaw
+    shape: box
+    extents_m: [0.442585, 0.227882, 0.188840]
+    origin_m: [-0.428964, -0.104104, 0.000003]
+    orientation_xyzw: [0.032433874, -0.706149662, 0.706427334, -0.035512258]
+    source: "mesh:package://epsilon_7040_description/meshes/collision_inner_jaw.stl@0.001,0.001,0.001"
+    source_pose: [-0.829000000, -0.115680000, 0.000000000, 0.000000000, 0.000000000, -0.248534886]
+  - tool: epsilon7040
+    link: K1_slewing_column
+    shape: box
+    extents_m: [0.999934, 0.136000, 0.135579]
+    origin_m: [0.068339, -0.914728, 0.000000]
+    orientation_xyzw: [0.471184202, 0.527243253, 0.527243253, 0.471184202]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_slewing_column.stl@0.001,0.001,0.001"
+    source_pose: [0.180000000, -2.365200000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: epsilon7040
+    link: K2_boom
+    shape: box
+    extents_m: [1.322342, 0.192616, 0.204940]
+    origin_m: [-2.014769, 0.065974, 0.000094]
+    orientation_xyzw: [0.616467561, -0.032669239, -0.041567978, 0.785603316]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_boom.stl@0.001,0.001,0.001"
+    source_pose: [-3.492883000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, -0.101235000]
+  - tool: epsilon7040
+    link: K3_arm
+    shape: box
+    extents_m: [1.519035, 0.162261, 0.133446]
+    origin_m: [0.319070, 0.000940, 1.443636]
+    orientation_xyzw: [0.516646139, 0.486030229, 0.520980542, -0.474795385]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_arm.stl@0.001,0.001,0.001"
+    source_pose: [0.392500000, 0.000000000, 0.000000000, -1.570796327, -1.570796327, 0.000000000]
+  - tool: epsilon7040
+    link: K4_outer_telescope
+    shape: box
+    extents_m: [1.510013, 0.093703, 0.078000]
+    origin_m: [0.290500, 0.000000, -1.581200]
+    orientation_xyzw: [0.499966374, 0.500033623, 0.500033623, -0.499966374]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_outer_telescope.stl@0.001,0.001,0.001"
+    source_pose: [0.290500000, 0.000000000, -0.071200000, -1.570796327, -1.570796327, 0.000000000]
+  - tool: epsilon7040
+    link: K5_inner_telescope
+    shape: box
+    extents_m: [1.504409, 0.137035, 0.066000]
+    origin_m: [0.264529, 1.447720, -0.000000]
+    orientation_xyzw: [0.000000000, -0.000000000, 0.695082668, 0.718929819]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_inner_telescope.stl@0.001,0.001,0.001"
+    source_pose: [0.281000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, -1.570796327]
+  - tool: epsilon7040
+    link: K6_double_joint_link
+    shape: box
+    extents_m: [0.185387, 0.103836, 0.069430]
+    origin_m: [0.118307, -0.003869, -0.000305]
+    orientation_xyzw: [0.010059754, 0.003772131, 0.999771462, -0.018482327]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_double_joint_link.stl@0.001,0.001,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 1.570796327, 0.000000000, 0.000000000]
+  - tool: epsilon7040
+    link: K7_rotator_upper_part
+    shape: capsule
+    extents_m: [0.163801, 0.044935]
+    origin_m: [-0.000424, -0.007699, 0.118874]
+    orientation_xyzw: [0.706073133, 0.706272194, 0.034345133, -0.038219505]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_rotator_upper_part_clamp.stl@0.001,0.00109,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, -1.570796327, 0.000000000, -1.570796327]
+  - tool: epsilon7040
+    link: K8_rotator_lower_part
+    shape: box
+    extents_m: [0.189872, 0.106714, 0.071277]
+    origin_m: [0.001910, 0.000083, -0.363300]
+    orientation_xyzw: [0.713453863, 0.700605936, -0.006891080, -0.009349894]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_rotator_lower_part.stl@0.001,0.001,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: epsilon7040
+    link: K8_tool_center_point
+    shape: box
+    extents_m: [0.394838, 0.200000, 0.233503]
+    origin_m: [0.000110, 0.008721, -0.103093]
+    orientation_xyzw: [0.707036739, 0.707036737, 0.009952444, -0.009952417]
+    source: "mesh:package://epsilon_7040_description/meshes/collision_pincer_frame.stl@0.001,0.001,0.001"
+    source_pose: [0.000000000, 0.000000000, -0.246800000, 0.000000000, 3.141592654, 0.000000000]
+  - tool: epsilon7040
+    link: control_box
+    shape: box
+    extents_m: [0.550000, 0.400000, 0.225000]
+    origin_m: [-0.000000, -0.040000, 0.000000]
+    orientation_xyzw: [0.500000000, 0.500000000, 0.500000000, -0.500000000]
+    source: "box:0.8,0.45,1.1"
+    source_pose: [0.000000000, -0.040000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: epsilon7040
+    link: control_box_sensor_mount
+    shape: box
+    extents_m: [0.550000, 0.400000, 0.225000]
+    origin_m: [-0.000000, -0.040000, 0.000000]
+    orientation_xyzw: [0.500000000, 0.500000000, 0.500000000, -0.500000000]
+    source: "box:0.8,0.45,1.1"
+    source_pose: [0.000000000, -0.040000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: epsilon7040
+    link: hydraulic_block
+    shape: box
+    extents_m: [0.340000, 0.310000, 0.200000]
+    origin_m: [-0.000000, 0.000000, 0.000000]
+    orientation_xyzw: [0.500000000, 0.500000000, 0.500000000, 0.500000000]
+    source: "box:0.4,0.68,0.62"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: K0_mounting_base
+    shape: box
+    extents_m: [2.266948, 0.797056, 0.408198]
+    origin_m: [-0.143463, 0.349672, -0.223394]
+    orientation_xyzw: [0.453228552, -0.459227828, -0.538705081, 0.541747651]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_mounting_base.stl@0.001,0.001,0.001"
+    source_pose: [-0.315000000, 0.350000000, 0.148500000, 1.570796327, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: K10_left_rail
+    shape: box
+    extents_m: [0.684869, 0.586269, 0.600045]
+    origin_m: [-0.751178, 0.116359, -0.020920]
+    orientation_xyzw: [0.391727478, -0.190780996, -0.364216992, 0.823102774]
+    source: "mesh:package://pzs100_description/meshes/rail_collision.stl@0.001,0.001,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: K12_right_rail
+    shape: box
+    extents_m: [0.684869, 0.586269, 0.600045]
+    origin_m: [-0.751178, 0.116359, -0.020920]
+    orientation_xyzw: [0.391727478, -0.190780996, -0.364216992, 0.823102774]
+    source: "mesh:package://pzs100_description/meshes/rail_collision.stl@0.001,0.001,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: K1_slewing_column
+    shape: box
+    extents_m: [0.999934, 0.136000, 0.135579]
+    origin_m: [0.068339, -0.914728, 0.000000]
+    orientation_xyzw: [0.471184202, 0.527243253, 0.527243253, 0.471184202]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_slewing_column.stl@0.001,0.001,0.001"
+    source_pose: [0.180000000, -2.365200000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: K2_boom
+    shape: box
+    extents_m: [1.322342, 0.192616, 0.204940]
+    origin_m: [-2.014769, 0.065974, 0.000094]
+    orientation_xyzw: [0.616467561, -0.032669239, -0.041567978, 0.785603316]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_boom.stl@0.001,0.001,0.001"
+    source_pose: [-3.492883000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, -0.101235000]
+  - tool: pzs100
+    link: K3_arm
+    shape: box
+    extents_m: [1.519035, 0.162261, 0.133446]
+    origin_m: [0.319070, 0.000940, 1.443636]
+    orientation_xyzw: [0.516646139, 0.486030229, 0.520980542, -0.474795385]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_arm.stl@0.001,0.001,0.001"
+    source_pose: [0.392500000, 0.000000000, 0.000000000, -1.570796327, -1.570796327, 0.000000000]
+  - tool: pzs100
+    link: K4_outer_telescope
+    shape: box
+    extents_m: [1.510013, 0.093703, 0.078000]
+    origin_m: [0.290500, 0.000000, -1.581200]
+    orientation_xyzw: [0.499966374, 0.500033623, 0.500033623, -0.499966374]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_outer_telescope.stl@0.001,0.001,0.001"
+    source_pose: [0.290500000, 0.000000000, -0.071200000, -1.570796327, -1.570796327, 0.000000000]
+  - tool: pzs100
+    link: K5_inner_telescope
+    shape: box
+    extents_m: [1.504409, 0.137035, 0.066000]
+    origin_m: [0.264529, 1.447720, -0.000000]
+    orientation_xyzw: [0.000000000, -0.000000000, 0.695082668, 0.718929819]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_inner_telescope.stl@0.001,0.001,0.001"
+    source_pose: [0.281000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, -1.570796327]
+  - tool: pzs100
+    link: K6_double_joint_link
+    shape: box
+    extents_m: [0.185387, 0.103836, 0.069430]
+    origin_m: [0.118307, -0.003869, -0.000305]
+    orientation_xyzw: [0.010059754, 0.003772131, 0.999771462, -0.018482327]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_double_joint_link.stl@0.001,0.001,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 1.570796327, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: K7_rotator_upper_part
+    shape: capsule
+    extents_m: [0.163801, 0.044935]
+    origin_m: [-0.000424, -0.007699, 0.118874]
+    orientation_xyzw: [0.706073133, 0.706272194, 0.034345133, -0.038219505]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_rotator_upper_part_clamp.stl@0.001,0.00109,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, -1.570796327, 0.000000000, -1.570796327]
+  - tool: pzs100
+    link: K8_rotator_lower_part
+    shape: box
+    extents_m: [0.189872, 0.106714, 0.071277]
+    origin_m: [0.001910, 0.000083, -0.363300]
+    orientation_xyzw: [0.713453863, 0.700605936, -0.006891080, -0.009349894]
+    source: "mesh:package://epsilon_crane_description/meshes/collision_rotator_lower_part.stl@0.001,0.001,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: K8_tool_center_point
+    shape: box
+    extents_m: [0.469156, 0.370046, 0.210251]
+    origin_m: [-0.000521, 0.026838, 0.207673]
+    orientation_xyzw: [0.002235602, 0.003345096, 0.717403524, 0.696646249]
+    source: "mesh:package://pzs100_description/meshes/frame_collision.stl@0.001,0.001,0.001"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 3.141592654, 0.000000000]
+  - tool: pzs100
+    link: control_box
+    shape: box
+    extents_m: [0.550000, 0.400000, 0.225000]
+    origin_m: [-0.000000, -0.040000, 0.000000]
+    orientation_xyzw: [0.500000000, 0.500000000, 0.500000000, -0.500000000]
+    source: "box:0.8,0.45,1.1"
+    source_pose: [0.000000000, -0.040000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: control_box_sensor_mount
+    shape: box
+    extents_m: [0.550000, 0.400000, 0.225000]
+    origin_m: [-0.000000, -0.040000, 0.000000]
+    orientation_xyzw: [0.500000000, 0.500000000, 0.500000000, -0.500000000]
+    source: "box:0.8,0.45,1.1"
+    source_pose: [0.000000000, -0.040000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+  - tool: pzs100
+    link: hydraulic_block
+    shape: box
+    extents_m: [0.340000, 0.310000, 0.200000]
+    origin_m: [-0.000000, 0.000000, 0.000000]
+    orientation_xyzw: [0.500000000, 0.500000000, 0.500000000, 0.500000000]
+    source: "box:0.4,0.68,0.62"
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
+
+# Pairs self-collision does not check, with the derivation's own reason.
+allowed_self_pairs:
+  - [K0_mounting_base, K1_slewing_column]  # Adjacent
+  - [K0_mounting_base, control_box]  # Never
+  - [K0_mounting_base, control_box_sensor_mount]  # Never
+  - [K0_mounting_base, hydraulic_block]  # Never
+  - [K10_left_rail, K12_right_rail]  # Always
+  - [K10_left_rail, K6_double_joint_link]  # Never
+  - [K10_left_rail, K7_rotator_upper_part]  # Default
+  - [K10_left_rail, K8_rotator_lower_part]  # Default
+  - [K10_left_rail, K8_tool_center_point]  # Adjacent
+  - [K10_outer_jaw, K6_double_joint_link]  # Never
+  - [K10_outer_jaw, K7_rotator_upper_part]  # Never
+  - [K10_outer_jaw, K8_rotator_lower_part]  # Never
+  - [K10_outer_jaw, K8_tool_center_point]  # Adjacent
+  - [K12_inner_jaw, K6_double_joint_link]  # Never
+  - [K12_inner_jaw, K7_rotator_upper_part]  # Never
+  - [K12_inner_jaw, K8_rotator_lower_part]  # Never
+  - [K12_inner_jaw, K8_tool_center_point]  # Adjacent
+  - [K12_right_rail, K6_double_joint_link]  # Never
+  - [K12_right_rail, K7_rotator_upper_part]  # Default
+  - [K12_right_rail, K8_rotator_lower_part]  # Default
+  - [K12_right_rail, K8_tool_center_point]  # Adjacent
+  - [K1_slewing_column, K2_boom]  # Adjacent
+  - [K1_slewing_column, K4_outer_telescope]  # Never
+  - [K1_slewing_column, control_box]  # Adjacent
+  - [K1_slewing_column, control_box_sensor_mount]  # Always
+  - [K1_slewing_column, hydraulic_block]  # Adjacent
+  - [K2_boom, K3_arm]  # Adjacent
+  - [K2_boom, K6_double_joint_link]  # Never
+  - [K2_boom, K7_rotator_upper_part]  # Never
+  - [K2_boom, K8_rotator_lower_part]  # Never
+  - [K2_boom, control_box]  # Never
+  - [K2_boom, control_box_sensor_mount]  # Default
+  - [K2_boom, hydraulic_block]  # Never
+  - [K3_arm, K4_outer_telescope]  # Adjacent
+  - [K3_arm, K5_inner_telescope]  # Default
+  - [K3_arm, K6_double_joint_link]  # Never
+  - [K3_arm, control_box]  # Never
+  - [K3_arm, control_box_sensor_mount]  # Never
+  - [K3_arm, hydraulic_block]  # Never
+  - [K4_outer_telescope, K5_inner_telescope]  # Adjacent
+  - [K4_outer_telescope, K6_double_joint_link]  # Never
+  - [K4_outer_telescope, K7_rotator_upper_part]  # Never
+  - [K4_outer_telescope, control_box]  # Never
+  - [K4_outer_telescope, control_box_sensor_mount]  # Never
+  - [K5_inner_telescope, K6_double_joint_link]  # Adjacent
+  - [K5_inner_telescope, control_box]  # Never
+  - [K5_inner_telescope, control_box_sensor_mount]  # Never
+  - [K6_double_joint_link, K7_rotator_upper_part]  # Adjacent
+  - [K6_double_joint_link, K8_rotator_lower_part]  # Never
+  - [K6_double_joint_link, K8_tool_center_point]  # Never
+  - [K6_double_joint_link, control_box]  # Never
+  - [K6_double_joint_link, control_box_sensor_mount]  # Never
+  - [K6_double_joint_link, hydraulic_block]  # Never
+  - [K7_rotator_upper_part, K8_rotator_lower_part]  # Adjacent
+  - [K7_rotator_upper_part, K8_tool_center_point]  # Never
+  - [K7_rotator_upper_part, control_box]  # Never
+  - [K7_rotator_upper_part, control_box_sensor_mount]  # Never
+  - [K7_rotator_upper_part, hydraulic_block]  # Never
+  - [K8_rotator_lower_part, K8_tool_center_point]  # Adjacent
+  - [K8_rotator_lower_part, control_box]  # Never
+  - [K8_rotator_lower_part, control_box_sensor_mount]  # Never
+  - [control_box, control_box_sensor_mount]  # Adjacent
+  - [control_box, hydraulic_block]  # Never
+  - [control_box_sensor_mount, hydraulic_block]  # Never

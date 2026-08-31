@@ -7,6 +7,7 @@
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
   <build_depend>eigen</build_depend>
   <exec_depend>eigen</exec_depend>
   <depend>pinocchio</depend>
@@ -21,7 +22,16 @@
   <exec_depend>pzs100_description</exec_depend>
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>xacro</exec_depend>
+  <!-- `crane_model/symbolic.py` builds the equations of motion as a CasADi
+       graph over Pinocchio's own CasADi bindings. It is part of the installed
+       package and not a script, because `crane_planning` assembles its optimal
+       control problem from it at runtime. -->
+  <depend>casadi</depend>
+  <!-- The Python model reads the same URDF and hydraulics.yaml as the C++ one. -->
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

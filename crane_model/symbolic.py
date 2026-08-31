@@ -55,7 +55,6 @@ carries both, and says which is which everywhere:
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -64,6 +63,9 @@ import numpy as np
 import pinocchio as pin
 import pinocchio.casadi as cpin
 import yaml
+
+from .conventions import Tool, default_hydraulics_path
+from .description import parse as parse_description
 
 # --- the canonical eight of the model API contract §2 -------------------------
 
@@ -218,11 +220,6 @@ class Constants:
         return self.pzs100_joints if tool == "pzs100" else self.epsilon7040_joints
 
 
-def default_hydraulics_path() -> Path:
-    """`config/hydraulics.yaml` beside this package's `scripts/`."""
-    return Path(__file__).resolve().parent.parent / "config" / "hydraulics.yaml"
-
-
 def _at(root, key: str, path: Path):
     node = root
     for part in key.split("."):
@@ -246,7 +243,7 @@ def load_constants(path: Path | None = None) -> Constants:
     A missing key is an exception and never a default, for the reason the file's
     own header gives: a wrong hydraulic constant is a wrong force limit.
     """
-    path = Path(path) if path is not None else default_hydraulics_path()
+    path = Path(path) if path is not None else Path(default_hydraulics_path())
     with open(path) as stream:
         root = yaml.safe_load(stream)
     if not isinstance(root, dict):
@@ -637,55 +634,43 @@ def parse(
     if tool not in TOOLS:
         raise ValueError(f"tool {tool} is not one of {TOOLS}")
 
-    model = pin.buildModelFromXML(description_xml)
-    model.gravity.linear = np.asarray(gravity, dtype=float)
-    tree = ET.fromstring(description_xml)
+    # The canonical mapping -- joint binding, the `<mimic>` scan, P and the
+    # per-joint damping -- belongs to `crane_model.description`, which the C++
+    # library's Python counterpart uses too. Read there, not restated here.
+    shared = parse_description(
+        description_xml, Tool(tool), gravity, names=tuple(constants.joints(tool))
+    )
+    model = shared.model
+    canonical = list(shared.names)
 
     out = Description(
         tool=tool,
         constants=constants,
         model=model,
-        neutral=pin.neutral(model),
+        neutral=shared.neutral,
     )
-
-    canonical = constants.joints(tool)
-    out.joints = [_bind(model, name) for name in canonical]
-
-    for joint in tree.iter("joint"):
-        mimic = joint.find("mimic")
-        name = joint.get("name")
-        if mimic is None or name is None:
-            continue
-        driver = mimic.get("joint")
-        if driver not in canonical or not model.existJointName(name):
-            continue
-        out.coupled.append(
-            CoupledJoint(
-                name=name,
-                slot=_bind(model, name),
-                source=canonical.index(driver),
-                multiplier=float(mimic.get("multiplier", 1.0)),
-                offset=float(mimic.get("offset", 0.0)),
+    out.joints = [
+        JointSlot(drives[0].slot.idx_q, drives[0].slot.idx_v, drives[0].slot.nq == 2)
+        for drives in shared.drives
+    ]
+    for source, drives in enumerate(shared.drives):
+        for drive in drives[1:]:
+            out.coupled.append(
+                CoupledJoint(
+                    name="",
+                    slot=JointSlot(
+                        drive.slot.idx_q, drive.slot.idx_v, drive.slot.nq == 2
+                    ),
+                    source=source,
+                    multiplier=drive.multiplier,
+                    offset=drive.offset,
+                )
             )
-        )
-
-    out.drives = [[(slot.velocity_index, 1.0)] for slot in out.joints]
-    for coupled in out.coupled:
-        out.drives[coupled.source].append(
-            (coupled.slot.velocity_index, coupled.multiplier)
-        )
-
-    # D of `wiki/robot_model.md` §1. The description is its source
-    # (`wiki/implementation/parameters.md` §1) and §5 says those entries are the
-    # identified values on the actuated axes and the hand-tuned per-tool values
-    # on the two passive ones -- which is why reading them off the selected
-    # description gets the tool dependence right without a table here.
-    damping = {}
-    for joint in tree.iter("joint"):
-        dynamics = joint.find("dynamics")
-        if dynamics is not None and dynamics.get("damping") is not None:
-            damping[joint.get("name")] = float(dynamics.get("damping"))
-    out.damping = [damping.get(name, 0.0) for name in canonical]
+    out.drives = [
+        [(drive.slot.idx_v, drive.multiplier) for drive in drives]
+        for drives in shared.drives
+    ]
+    out.damping = list(shared.damping)
 
     # Except where `config/hydraulics.yaml` says otherwise. The override table is
     # data carrying its own reason, so this loop has no idea that the joint on it

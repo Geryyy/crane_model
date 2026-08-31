@@ -14,6 +14,9 @@ find_package(coal REQUIRED)
 # wiki/implementation/libraries.md lists for configuration outside the parameter
 # system; it brings no ROS with it, so contract §6 still holds.
 find_package(yaml-cpp REQUIRED)
+# The planning-side model is Python on Pinocchio's and Coal's own bindings; it
+# reads the same URDF and the same config/hydraulics.yaml as the C++ library.
+find_package(ament_cmake_python REQUIRED)
 
 add_library(${PROJECT_NAME} src/model.cpp)
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
@@ -66,6 +69,8 @@ install(
   NAMESPACE ${PROJECT_NAME}::
   DESTINATION share/${PROJECT_NAME}/cmake)
 
+ament_python_install_package(${PROJECT_NAME})
+
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(Eigen3 pinocchio coal yaml-cpp)
 
@@ -86,6 +91,11 @@ if(BUILD_TESTING)
     PRIVATE
       CRANE_MODEL_TEST_DESCRIPTION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/description"
       CRANE_MODEL_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
+
+  # The Python model against the same recorded fixture the gtest above uses.
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_python_parity test/test_python_parity.py)
+  ament_add_pytest_test(test_python_collision test/test_python_collision.py)
 endif()
 
 ament_package(CONFIG_EXTRAS "cmake/boost_python310_headers.cmake")
