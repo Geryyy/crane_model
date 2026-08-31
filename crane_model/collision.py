@@ -39,6 +39,14 @@ class CollisionPrimitive:
     pose_in_mounting_base: pin.SE3 = field(default_factory=pin.SE3.Identity)
     dimensions_m: np.ndarray = field(default_factory=lambda: np.zeros(3))
     structural: bool = False
+    #: This body is held by the tool. It is then **not** checked against the
+    #: links that hold it -- they are gripping it, and reporting that as a
+    #: collision refuses every pose -- and it **is** checked against the rest of
+    #: the scene, which a scene body otherwise never is. A caller that carries
+    #: something has to place it: the pose is read at the configuration being
+    #: checked, so it travels with the tool rather than standing where the
+    #: machine set off from.
+    attached_to_tool: bool = False
 
 
 @dataclass(frozen=True)
@@ -155,6 +163,22 @@ class LinkGeometry:
                 (entry["link"], model.getFrameId(entry["link"]), geometry, placement)
             )
 
+        # Which of those bodies are the hand rather than the arm. A payload is
+        # excluded from exactly these, and the set is derived from the
+        # description rather than named here: a body is carrying if the joint
+        # that places it is at or below the joint a payload mounts on.
+        mount = None
+        if model.existFrame(Frame.ROTATOR_LOWER_PART.value):
+            mount = model.frames[
+                model.getFrameId(Frame.ROTATOR_LOWER_PART.value)
+            ].parentJoint
+        self.detached = [
+            index
+            for index, (_, frame, _, _) in enumerate(self.bodies)
+            if mount is None
+            or mount not in list(model.supports[model.frames[frame].parentJoint])
+        ]
+
         allowed = {tuple(sorted(pair)) for pair in table["allowed_self_pairs"]}
         self.self_pairs = [
             (i, j)
@@ -187,6 +211,14 @@ def queries(model, data, geometry: LinkGeometry, configuration, scene) -> list:
 
     One result per scene primitive, in scene order, then one for the machine
     against itself. Each is the closest pair found against that object.
+
+    A primitive marked `attached_to_tool` is answered differently, and the two
+    halves go together. It is not checked against the links that hold it, which
+    would report the grip itself as a collision and refuse every pose. And it
+    *is* checked against the other scene primitives, which an ordinary scene
+    body never is -- because what a carried body is for is hitting the world,
+    and a payload checked only against the machine that carries it is a payload
+    that has not been checked at all.
     """
     validate_scene(scene)
     pin.forwardKinematics(model, data, configuration)
@@ -196,23 +228,38 @@ def queries(model, data, geometry: LinkGeometry, configuration, scene) -> list:
         (link, shape, base.actInv(data.oMf[frame]) * offset)
         for link, frame, shape, offset in geometry.bodies
     ]
+    detached = [placed[index] for index in geometry.detached]
+    shapes = {other.id: _scene_geometry(other) for other in scene}
 
     def closest(candidates):
         return min(candidates, key=lambda result: result.minimum_distance_m)
 
-    results = [
-        closest(
+    results = []
+    for other in scene:
+        pairs = [
             _distance(
                 shape,
                 pose,
-                _scene_geometry(other),
+                shapes[other.id],
                 other.pose_in_mounting_base,
                 other.id,
             )
-            for _, shape, pose in placed
-        )
-        for other in scene
-    ]
+            for _, shape, pose in (detached if other.attached_to_tool else placed)
+        ]
+        if other.attached_to_tool:
+            pairs += [
+                _distance(
+                    shapes[other.id],
+                    other.pose_in_mounting_base,
+                    shapes[obstacle.id],
+                    obstacle.pose_in_mounting_base,
+                    obstacle.id,
+                )
+                for obstacle in scene
+                if obstacle.id != other.id and not obstacle.attached_to_tool
+            ]
+        if pairs:
+            results.append(closest(pairs))
     if geometry.self_pairs:
         results.append(
             closest(

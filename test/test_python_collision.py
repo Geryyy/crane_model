@@ -123,3 +123,48 @@ def test_a_cylinder_given_a_radius_instead_of_an_extent_is_refused():
     with pytest.raises(CraneModelError) as refusal:
         model.collision_query(np.zeros(8), [wrong])
     assert refusal.value.code is ErrorCode.INVALID_SCENE
+
+
+def test_a_carried_body_ignores_the_grip_and_still_sees_the_world():
+    """
+    `attached_to_tool` is two rules, and both of them have to hold.
+
+    A payload sits *inside* the gripper -- that is what being gripped means --
+    so a body checked against the links holding it reports a collision at every
+    pose the machine can reach, and the planner refuses everything. Excluding
+    those links is only half the answer, though: a scene body is otherwise never
+    checked against another scene body, so the exclusion on its own would leave
+    the payload checked against nothing that matters.
+    """
+    model = build(Tool.PZS100)
+    q = np.zeros(8)
+    q[[0, 1, 2, 3, 6]] = (0.0, -0.2, 0.4, 1.0, 0.0)
+    q[7] = 0.30
+    q[[4, 5]] = model.passive_equilibrium(q[[0, 1, 2, 3, 6, 7]])
+    mount = model.forward_kinematics(q, Frame.MOUNTING_BASE, Frame.ROTATOR_LOWER_PART)
+    at_tool = pin.XYZQUATToSE3(
+        np.concatenate([mount.position_m, mount.orientation_xyzw])
+    )
+
+    def payload(attached):
+        return CollisionPrimitive(
+            "payload",
+            "box",
+            at_tool,
+            np.array([0.9, 0.6, 0.6]),
+            attached_to_tool=attached,
+        )
+
+    # Unattached, it is buried in its own gripper.
+    assert model.collision_query(q, [payload(False)]).minimum_distance_m < 0.0
+    # Attached, the links holding it stop counting.
+    assert model.collision_query(q, [payload(True)]).minimum_distance_m > 0.0
+
+    # And it is still a body in the world: an obstacle where it is, is a hit
+    # that names the obstacle, while one out of reach is not.
+    inside = box("rock", at_tool.translation, side=0.4)
+    result = model.collision_queries(q, [payload(True), inside])[0]
+    assert result.minimum_distance_m < 0.0
+    assert result.other_id == "rock"
+    away = box("far_rock", at_tool.translation + np.array([6.0, 0.0, 0.0]), side=0.4)
+    assert model.collision_queries(q, [payload(True), away])[0].minimum_distance_m > 0.0

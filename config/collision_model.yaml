@@ -38,8 +38,8 @@ primitives:
     link: K1_slewing_column
     shape: box
     extents_m: [0.999934, 0.136000, 0.135579]
-    origin_m: [0.068339, -0.914728, 0.000000]
-    orientation_xyzw: [0.471184202, 0.527243253, 0.527243253, 0.471184202]
+    origin_m: [0.068339, -0.914728, -0.000000]
+    orientation_xyzw: [0.527243253, -0.471184202, -0.471184202, 0.527243253]
     source: "mesh:package://epsilon_crane_description/meshes/collision_slewing_column.stl@0.001,0.001,0.001"
     source_pose: [0.180000000, -2.365200000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
   - tool: epsilon7040
@@ -70,8 +70,8 @@ primitives:
     link: K5_inner_telescope
     shape: box
     extents_m: [1.504409, 0.137035, 0.066000]
-    origin_m: [0.264529, 1.447720, -0.000000]
-    orientation_xyzw: [0.000000000, -0.000000000, 0.695082668, 0.718929819]
+    origin_m: [0.264529, 1.447720, 0.000000]
+    orientation_xyzw: [-0.695082668, 0.718929819, 0.000000000, 0.000000000]
     source: "mesh:package://epsilon_crane_description/meshes/collision_inner_telescope.stl@0.001,0.001,0.001"
     source_pose: [0.281000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, -1.570796327]
   - tool: epsilon7040
@@ -158,8 +158,8 @@ primitives:
     link: K1_slewing_column
     shape: box
     extents_m: [0.999934, 0.136000, 0.135579]
-    origin_m: [0.068339, -0.914728, 0.000000]
-    orientation_xyzw: [0.471184202, 0.527243253, 0.527243253, 0.471184202]
+    origin_m: [0.068339, -0.914728, -0.000000]
+    orientation_xyzw: [0.527243253, -0.471184202, -0.471184202, 0.527243253]
     source: "mesh:package://epsilon_crane_description/meshes/collision_slewing_column.stl@0.001,0.001,0.001"
     source_pose: [0.180000000, -2.365200000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
   - tool: pzs100
@@ -190,8 +190,8 @@ primitives:
     link: K5_inner_telescope
     shape: box
     extents_m: [1.504409, 0.137035, 0.066000]
-    origin_m: [0.264529, 1.447720, -0.000000]
-    orientation_xyzw: [0.000000000, -0.000000000, 0.695082668, 0.718929819]
+    origin_m: [0.264529, 1.447720, 0.000000]
+    orientation_xyzw: [-0.695082668, 0.718929819, 0.000000000, 0.000000000]
     source: "mesh:package://epsilon_crane_description/meshes/collision_inner_telescope.stl@0.001,0.001,0.001"
     source_pose: [0.281000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, -1.570796327]
   - tool: pzs100
@@ -222,10 +222,10 @@ primitives:
     link: K8_tool_center_point
     shape: box
     extents_m: [0.469156, 0.370046, 0.210251]
-    origin_m: [-0.000521, 0.026838, 0.207673]
-    orientation_xyzw: [0.002235602, 0.003345096, 0.717403524, 0.696646249]
+    origin_m: [0.000521, 0.026838, -0.207673]
+    orientation_xyzw: [0.717403524, 0.696646249, -0.002235602, -0.003345096]
     source: "mesh:package://pzs100_description/meshes/frame_collision.stl@0.001,0.001,0.001"
-    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 3.141592654, 0.000000000]
+    source_pose: [0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000, 0.000000000]
   - tool: pzs100
     link: control_box
     shape: box
