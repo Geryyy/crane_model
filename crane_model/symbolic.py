@@ -132,9 +132,6 @@ K_AXIS_FLOW_OFFSET = 18
 # The link a payload attaches to (`wiki/robot_model.md` §5).
 PAYLOAD_MOUNT_LINK = "K8_rotator_lower_part"
 
-# The two tools, spelled as `config/hydraulics.yaml`'s `joints.tool` spells them.
-TOOLS = ("pzs100", "epsilon7040")
-
 
 # ------------------------------------------------------------- hydraulics.yaml
 
@@ -181,23 +178,10 @@ class Constants:
     arm_ps4_y: float = 0.0
     arm_ps4_z: float = 0.0
 
-    jaw_p0: float = 0.0
-    jaw_p1: float = 0.0
-    jaw_p2: float = 0.0
-    jaw_a9: float = 0.0
-    jaw_a10: float = 0.0
-    jaw_a11: float = 0.0
-    jaw_a12: float = 0.0
-    jaw_ps7_x: float = 0.0
-    jaw_ps7_y: float = 0.0
-    jaw_ps8_x: float = 0.0
-    jaw_ps8_y: float = 0.0
-
     eps_abs: float = 0.0
     eps_v: float = 0.0
 
-    pzs100_joints: tuple = ()
-    epsilon7040_joints: tuple = ()
+    joints: tuple = ()
     damping_overrides: tuple = ()
 
     # The sums the linkages actually rotate. Not measurements: each is a
@@ -215,9 +199,6 @@ class Constants:
 
     def arm_lateral_offset(self) -> float:
         return self.arm_ps4_y - self.arm_ps3_z
-
-    def joints(self, tool: str) -> tuple:
-        return self.pzs100_joints if tool == "pzs100" else self.epsilon7040_joints
 
 
 def _at(root, key: str, path: Path):
@@ -281,28 +262,13 @@ def load_constants(path: Path | None = None) -> Constants:
     out.arm_ps4_y = _number(root, "arm.pS4.y", path)
     out.arm_ps4_z = _number(root, "arm.pS4.z", path)
 
-    out.jaw_p0 = _number(root, "jaw.mirror.p0", path)
-    out.jaw_p1 = _number(root, "jaw.mirror.p1", path)
-    out.jaw_p2 = _number(root, "jaw.mirror.p2", path)
-    out.jaw_a9 = _number(root, "jaw.a9", path)
-    out.jaw_a10 = _number(root, "jaw.a10", path)
-    out.jaw_a11 = _number(root, "jaw.a11", path)
-    out.jaw_a12 = _number(root, "jaw.a12", path)
-    out.jaw_ps7_x = _number(root, "jaw.pS7.x", path)
-    out.jaw_ps7_y = _number(root, "jaw.pS7.y", path)
-    out.jaw_ps8_x = _number(root, "jaw.pS8.x", path)
-    out.jaw_ps8_y = _number(root, "jaw.pS8.y", path)
-
     out.eps_abs = _number(root, "smoothing.eps_abs", path)
     out.eps_v = _number(root, "smoothing.eps_v", path)
 
-    shared = _at(root, "joints.shared", path)
-    if len(shared) != K_GENERALIZED_DOF - 1:
-        raise ValueError(
-            f"{path}: joints.shared is not {K_GENERALIZED_DOF - 1} entries"
-        )
-    out.pzs100_joints = (*shared, _at(root, "joints.tool.pzs100", path))
-    out.epsilon7040_joints = (*shared, _at(root, "joints.tool.epsilon7040", path))
+    joints = _at(root, "joints", path)
+    if len(joints) != K_GENERALIZED_DOF:
+        raise ValueError(f"{path}: joints is not {K_GENERALIZED_DOF} entries")
+    out.joints = tuple(joints)
 
     overrides = root.get("damping_overrides") or []
     out.damping_overrides = tuple(
@@ -389,11 +355,6 @@ def _rotate(angle, value):
 def _perpendicular(value):
     """S_perp v, the planar 90 degree rotation of `wiki/nomenclature.md` §7."""
     return (-value[1], value[0])
-
-
-def _mirrored(value):
-    """diag(-1, 1) v, the reflection the 7040's outer jaw arm carries (§2.6)."""
-    return (-value[0], value[1])
 
 
 def _sub(left, right):
@@ -497,45 +458,13 @@ def arm_ratio(constants: Constants, q3):
     return _dot(in_plane, in_plane_rate) / stroke
 
 
-def jaw_ratio(constants: Constants, q8):
-    """
-    ds_8/dq_8 for the 7040, `wiki/hydraulics.md` §2.6.
-
-    The commanded outer-jaw angle q8 drives the inner jaw through the quadratic
-    fit phi_sim,9(q8) and the cylinder spans the two jaws, so its length depends
-    on both angles. Planar, exactly as the deployed model is. The reflection
-    applies to the outer arm and to its rate alike, and *after* S_perp in both --
-    diag(-1, 1) and S_perp do not commute.
-    """
-    mirror_angle = (constants.jaw_p0 * q8 + constants.jaw_p1) * q8 + constants.jaw_p2
-    mirror_rate = 2.0 * constants.jaw_p0 * q8 + constants.jaw_p1
-
-    outer_arm = _rotate(
-        q8, (constants.jaw_a10 + constants.jaw_ps7_x, constants.jaw_ps7_y)
-    )
-    inner_arm = _rotate(
-        mirror_angle, (constants.jaw_a12 + constants.jaw_ps8_x, constants.jaw_ps8_y)
-    )
-
-    c_cyl = _add(
-        _sub(inner_arm, _mirrored(outer_arm)),
-        (constants.jaw_a11 + constants.jaw_a9, 0.0),
-    )
-    c_cyl_rate = _sub(
-        _scale(mirror_rate, _perpendicular(inner_arm)),
-        _mirrored(_perpendicular(outer_arm)),
-    )
-    return _dot(c_cyl, c_cyl_rate) / _norm(c_cyl)
-
-
-def jacobian_diagonal(constants: Constants, tool: str, q2, q3, q8) -> list:
+def jacobian_diagonal(constants: Constants, q2, q3) -> list:
     """
     Return the diagonal of J_cyl, which is the whole of it.
 
     The geometry does not couple the axes at all (`wiki/hydraulics.md` §5.7), so
-    the off-diagonal entries are structurally zero and are never formed. Only q2,
-    q3 and -- for the 7040 -- q8 enter; the other three axes are a constant
-    radius or one-to-one.
+    the off-diagonal entries are structurally zero and are never formed. Only q2
+    and q3 enter; the other four axes are a constant radius or one-to-one.
     """
     diagonal = [None] * K_ACTUATED_DOF
     # q1 slewing: rack and pinion, the only constant transmission (§2.1).
@@ -547,10 +476,9 @@ def jacobian_diagonal(constants: Constants, tool: str, q2, q3, q8) -> list:
     diagonal[3] = ca.SX(1.0)
     # q7 rotator: a motor, so the motor angle is the joint coordinate (§2.5).
     diagonal[4] = ca.SX(1.0)
-    # q8 tool (§2.6). The PZS100 rail cylinder is one-to-one with q8 and there is
-    # no linkage to solve; the 7040 jaw is a four-bar whose cylinder spans both
-    # jaws, so its ratio is configuration-dependent like the boom's.
-    diagonal[5] = ca.SX(1.0) if tool == "pzs100" else jaw_ratio(constants, q8)
+    # q8 tool (§2.6): the PZS100 rail cylinder is one-to-one with q8 and there
+    # is no linkage to solve.
+    diagonal[5] = ca.SX(1.0)
     return diagonal
 
 
@@ -631,14 +559,11 @@ def parse(
     rail as a mimic of a joint that comes later in its own depth-first order --
     so the coupled joints come from the XML itself rather than being assumed.
     """
-    if tool not in TOOLS:
-        raise ValueError(f"tool {tool} is not one of {TOOLS}")
-
     # The canonical mapping -- joint binding, the `<mimic>` scan, P and the
     # per-joint damping -- belongs to `crane_model.description`, which the C++
     # library's Python counterpart uses too. Read there, not restated here.
     shared = parse_description(
-        description_xml, Tool(tool), gravity, names=tuple(constants.joints(tool))
+        description_xml, Tool(tool), gravity, names=tuple(constants.joints)
     )
     model = shared.model
     canonical = list(shared.names)
@@ -774,9 +699,7 @@ class CraneSymbolicModel:
         )
 
         self.cylinder_jacobian = ca.vertcat(
-            *jacobian_diagonal(
-                self.constants, tool, self.q[1], self.q[2], self.q[K_ACTUATED_ROWS[-1]]
-            )
+            *jacobian_diagonal(self.constants, self.q[1], self.q[2])
         )
         self.z = self._output_map()
 
@@ -848,8 +771,8 @@ class CraneSymbolicModel:
         Spread q and dq of the canonical eight over the parsed model's rows.
 
         The mimics follow their source and every joint outside both sets keeps its
-        neutral value and zero velocity: the four cylinder sub-chains and the
-        7040's driven inner jaw are loops the description closes only in Gazebo.
+        neutral value and zero velocity: the four cylinder sub-chains are loops
+        the description closes only in Gazebo.
         """
         model = self.description.model
         configuration = ca.SX(self.description.neutral)
@@ -976,11 +899,7 @@ class CraneSymbolicModel:
                 [q],
                 [
                     ca.densify(
-                        ca.vertcat(
-                            *jacobian_diagonal(
-                                self.constants, self.tool, q[1], q[2], q[7]
-                            )
-                        )
+                        ca.vertcat(*jacobian_diagonal(self.constants, q[1], q[2]))
                     )
                 ],
                 ["q"],

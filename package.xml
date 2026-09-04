@@ -17,7 +17,6 @@
        a parser, not ROS, so the package stays ROS-free. -->
   <depend>yaml-cpp</depend>
   <!-- The library remains ROS-free; these are only for the URDF update launch. -->
-  <exec_depend>epsilon_7040_description</exec_depend>
   <exec_depend>epsilon_crane_description</exec_depend>
   <exec_depend>pzs100_description</exec_depend>
   <exec_depend>ros2launch</exec_depend>

@@ -46,8 +46,7 @@ import numpy as np
 TOPIC = "/joint_states"
 
 # The canonical order of contract section 2, by the legacy URDF joint names the
-# descriptions and the recordings both use.  `q9_left_rail_joint` is the
-# PZS100's `q8`; the recordings carry the rail gripper, not the 7040 jaw.
+# description and the recordings both use.  `q9_left_rail_joint` is `q8`.
 JOINTS = (
     "theta1_slewing_joint",
     "theta2_boom_joint",

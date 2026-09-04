@@ -90,28 +90,13 @@ struct Constants
   double arm_ps4_y{};
   double arm_ps4_z{};
 
-  // 7040 jaw four-bar, §2.6, whose numbers §6.2 does not carry.
-  double jaw_p0{};       // phi_sim,9(q8), quadratic coefficient
-  double jaw_p1{};
-  double jaw_p2{};
-  double jaw_a9{};       // outer jaw pivot on the pincer frame
-  double jaw_a10{};      // outer jaw arm
-  double jaw_a11{};      // inner jaw pivot
-  double jaw_a12{};      // inner jaw arm
-  double jaw_ps7_x{};    // barrel end, on the outer jaw
-  double jaw_ps7_y{};
-  double jaw_ps8_x{};    // rod end, on the inner jaw
-  double jaw_ps8_y{};
-
   // The smoothing wiki/mpc.md §3.1 requires of constraint 7, applied to the
   // *model* and never to the inner loop's dead-zone compensator.
   double eps_abs{};      // |v| ~= sqrt(v^2 + eps^2), m/s
   double eps_v{};        // the A^{+-} switch scale, m/s
 
-  // The canonical eight of the model API contract §2, per tool. Only the
-  // eighth entry differs between the two descriptions.
-  std::array<std::string, kGeneralizedDof> pzs100_joints{};
-  std::array<std::string, kGeneralizedDof> epsilon7040_joints{};
+  // The canonical eight of the model API contract §2.
+  std::array<std::string, kGeneralizedDof> joints{};
 
   std::vector<DampingOverride> damping_overrides;
 
@@ -122,11 +107,6 @@ struct Constants
   [[nodiscard]] double arm_link_x() const { return arm_a3 + arm_ps4_x; }
   [[nodiscard]] double arm_link_y() const { return -arm_ps4_z; }
   [[nodiscard]] double arm_lateral_offset() const { return arm_ps4_y - arm_ps3_z; }
-
-  [[nodiscard]] const std::array<std::string, kGeneralizedDof>& joints(Tool tool) const
-  {
-    return tool == Tool::Pzs100 ? pzs100_joints : epsilon7040_joints;
-  }
 };
 
 // Where the build put `config/hydraulics.yaml`: the installed copy if it is
@@ -230,12 +210,6 @@ inline Planar perpendicular(const Planar& value)
   return Planar{-value.y, value.x};
 }
 
-// diag(-1, 1) v, the reflection the 7040's outer jaw arm carries (§2.6).
-inline Planar mirrored(const Planar& value)
-{
-  return Planar{-value.x, value.y};
-}
-
 inline Planar operator-(const Planar& left, const Planar& right)
 {
   return Planar{left.x - right.x, left.y - right.y};
@@ -288,11 +262,11 @@ struct CylinderStroke
 inline CylinderStroke boom_stroke(const hydraulics::Constants& constants, double q2)
 {
   using std::sqrt;
-  const Planar p_s0{double(constants.boom_ps0_x), double(constants.boom_ps0_y)};
-  const Planar p_s1{double(constants.boom_ps1_x), double(constants.boom_ps1_y)};
+  const Planar p_s0{constants.boom_ps0_x, constants.boom_ps0_y};
+  const Planar p_s1{constants.boom_ps1_x, constants.boom_ps1_y};
 
   const Planar p_s2 =
-    rotate(q2, Planar{double(constants.boom_link_x()), double(constants.boom_ps2_y)});
+    rotate(q2, Planar{constants.boom_link_x(), constants.boom_ps2_y});
   const Planar d_pivot = p_s2 - p_s1;
   const Planar d_pivot_rate = perpendicular(p_s2);  // d(p_S2)/dq2
 
@@ -337,9 +311,9 @@ inline CylinderStroke arm_stroke(const hydraulics::Constants& constants, double 
 {
   using std::sqrt;
   const Planar moving =
-    rotate(q3, Planar{double(constants.arm_link_x()), double(constants.arm_link_y())});
+    rotate(q3, Planar{constants.arm_link_x(), constants.arm_link_y()});
   const Planar in_plane =
-    moving - Planar{double(constants.arm_ps3_x), double(constants.arm_ps3_y)};
+    moving - Planar{constants.arm_ps3_x, constants.arm_ps3_y};
   const Planar in_plane_rate = perpendicular(moving);
 
   const double lateral = constants.arm_lateral_offset();
@@ -347,67 +321,28 @@ inline CylinderStroke arm_stroke(const hydraulics::Constants& constants, double 
   return CylinderStroke{stroke, dot(in_plane, in_plane_rate) / stroke};
 }
 
-// wiki/hydraulics.md §2.6 for the 7040, composed the way the deployed model
-// composes it. The commanded outer-jaw angle q8 drives the inner jaw through
-// the quadratic fit phi_sim,9(q8), and the cylinder spans the two jaws, so its
-// length depends on both angles. Frames 19 and 20 of the deployed
-// comp_transform_8_19.hpp and comp_transform_8_20.hpp place the two pins: the
-// outer jaw hangs off -a_9 with its arm mirrored, the inner jaw off +a_11.
-// Planar, exactly as the deployed comp_transform_8_24.hpp is -- the two pins
-// are p_S8z + p_S7z = 24.25 mm apart out of plane, which the deployed model
-// drops and which is worth at most 0.6 mm of length over the jaw range.
-inline CylinderStroke jaw_stroke(const hydraulics::Constants& constants, double q8)
-{
-  const double mirror_angle =
-    (constants.jaw_p0 * q8 + constants.jaw_p1) * q8 + constants.jaw_p2;
-  const double mirror_rate = 2.0 * constants.jaw_p0 * q8 + constants.jaw_p1;
-
-  const Planar outer_arm = rotate(
-    q8,
-    Planar{
-      double(constants.jaw_a10 + constants.jaw_ps7_x), double(constants.jaw_ps7_y)});
-  const Planar inner_arm = rotate(
-    mirror_angle,
-    Planar{
-      double(constants.jaw_a12 + constants.jaw_ps8_x), double(constants.jaw_ps8_y)});
-
-  // The reflection applies to the outer arm and to its rate alike, and it is
-  // applied *after* S_perp in both -- diag(-1, 1) and S_perp do not commute.
-  const Planar c_cyl = inner_arm - mirrored(outer_arm) +
-    Planar{double(constants.jaw_a11 + constants.jaw_a9), double(0.0)};
-  const Planar c_cyl_rate =
-    mirror_rate * perpendicular(inner_arm) - mirrored(perpendicular(outer_arm));
-
-  const double stroke = norm(c_cyl);
-  return CylinderStroke{stroke, dot(c_cyl, c_cyl_rate) / stroke};
-}
-
 // The diagonal of J_cyl (wiki/nomenclature.md §7), which is the whole of it:
 // the geometry does not couple the axes at all (§5.7), so the off-diagonal
 // entries are structurally zero and are never formed.
 //
-// Only q2, q3 and -- for the 7040 -- q8 enter. The other three axes are a
-// constant radius or one-to-one, so they carry no configuration dependence for
-// either scalar type.
+// Only q2 and q3 enter. The other four axes are a constant radius or
+// one-to-one, so they carry no configuration dependence for either scalar type.
 inline std::array<double, kActuatedDof> jacobian_diagonal(
-  const hydraulics::Constants& constants, Tool tool,
-  double q2, double q3, double q8)
+  const hydraulics::Constants& constants, double q2, double q3)
 {
   std::array<double, kActuatedDof> diagonal{};
   // q1 slewing: rack and pinion, the only constant transmission (§2.1).
-  diagonal[kSlewingAxis] = double(constants.r_gear);
+  diagonal[kSlewingAxis] = constants.r_gear;
   diagonal[kBoomAxis] = boom_stroke(constants, q2).ratio;
   diagonal[kArmAxis] = arm_stroke(constants, q3).ratio;
   // q4 telescope: the cylinder is one-to-one with the joint coordinate; the
   // factor of two sits between q4 and the tip travel, not here (§2.4).
-  diagonal[kTelescopeAxis] = double(1.0);
+  diagonal[kTelescopeAxis] = 1.0;
   // q7 rotator: a motor, so the motor angle is the joint coordinate (§2.5).
-  diagonal[kRotatorAxis] = double(1.0);
-  // q8 tool (§2.6). The PZS100 rail cylinder is one-to-one with q8 and there is
-  // no linkage to solve; the 7040 jaw is a four-bar and its cylinder spans both
-  // jaws, so its ratio is configuration-dependent like the boom's.
-  diagonal[kToolAxis] =
-    tool == Tool::Pzs100 ? double(1.0) : jaw_stroke(constants, q8).ratio;
+  diagonal[kRotatorAxis] = 1.0;
+  // q8 tool (§2.6): the PZS100 rail cylinder is one-to-one with q8 and there is
+  // no linkage to solve.
+  diagonal[kToolAxis] = 1.0;
   return diagonal;
 }
 

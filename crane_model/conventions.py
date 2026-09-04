@@ -25,10 +25,9 @@ PASSIVE_INDICES = (4, 5)
 
 
 class Tool(enum.Enum):
-    """Tool identifier; values are the `joints.tool` keys in hydraulics.yaml."""
+    """Tool identifier; the value is the tool's own spelling."""
 
     PZS100 = "pzs100"
-    EPSILON_7040 = "epsilon7040"
 
 
 class Frame(enum.Enum):
@@ -51,7 +50,6 @@ class Frame(enum.Enum):
     ROTATOR = "K7_rotator_upper_part"
     ROTATOR_LOWER_PART = "K8_rotator_lower_part"
     TCP = "K8_tool_center_point"
-    TOOL_CONTACT = "tool_contact_point"
 
 
 def default_hydraulics_path() -> str:
@@ -67,11 +65,10 @@ def default_hydraulics_path() -> str:
         return os.path.join(here, "config", "hydraulics.yaml")
 
 
-def canonical_joints(tool: Tool, config_path: str | None = None) -> tuple[str, ...]:
-    """Read the eight canonical joint names in contract order, for `tool`."""
+def canonical_joints(config_path: str | None = None) -> tuple[str, ...]:
+    """Read the eight canonical joint names in contract order."""
     with open(config_path or default_hydraulics_path(), encoding="utf-8") as handle:
-        joints = yaml.safe_load(handle)["joints"]
-    shared = tuple(joints["shared"])
-    if len(shared) != GENERALIZED_DOF - 1:
-        raise ValueError(f"joints.shared carries {len(shared)} names, expected 7")
-    return shared + (joints["tool"][tool.value],)
+        joints = tuple(yaml.safe_load(handle)["joints"])
+    if len(joints) != GENERALIZED_DOF:
+        raise ValueError(f"joints carries {len(joints)} names, expected 8")
+    return joints

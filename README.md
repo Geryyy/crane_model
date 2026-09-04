@@ -8,8 +8,8 @@ in Python (model API contract §9).
 
 ## Updating the checked-in URDF descriptions
 
-The files in `test/description` are expanded fixtures. Generate both of them
-from the current xacros by running this from the workspace root:
+The file in `test/description` is an expanded fixture. Generate it from the
+current xacro by running this from the workspace root:
 
 ```bash
 source install/setup.bash
@@ -17,9 +17,8 @@ ros2 launch crane_model update_test_descriptions.launch.py
 ```
 
 The launch file expands
-`epsilon_crane_description/urdf/crane_description.urdf.xacro` once for each
-tool and writes `pzs100.urdf` and `epsilon_7040.urdf` to
-`test/description`. To write to another directory, pass
+`epsilon_crane_description/urdf/crane_description.urdf.xacro` and writes
+`pzs100.urdf` to `test/description`. To write to another directory, pass
 `output_dir:=/path/to/output`.
 
 ## What has a backend
@@ -36,8 +35,8 @@ tool and writes `pzs100.urdf` and `epsilon_7040.urdf` to
 eight coordinates of contract §2 onto it by their URDF joint names, which keep
 their legacy spelling (`wiki/implementation/ros2_interfaces.md` §3.1). A
 description that will not parse is `InvalidRobotDescription`, one that does not
-carry a canonical joint is `MissingJoint` — including the tool-dependent `q8`,
-so the wrong tool against the wrong description is caught at construction.
+carry a canonical joint is `MissingJoint` — including the tool's `q8`, so a
+description without the tool axis is caught at construction.
 
 Pinocchio and Coal are *private* implementation details: they appear in no
 public header, and a consumer links the shared libraries without ever seeing
@@ -52,8 +51,6 @@ things live outside it, and they are in one file rather than in this source:
 - the chamber areas, `r_gear` and `V_m` of `wiki/hydraulics.md` §6.1, and the
   boom and arm linkage geometry of §6.2 — the numbers `cylinder_jacobian`,
   `transmission` and `cylinder_force` are computed from;
-- the 7040 jaw four-bar of §2.6, whose equations the wiki carries and whose
-  numbers it does not; each entry names the deployed file it was ported from;
 - the per-joint **damping override** table, which is how the telescope entry
   comes out zero (see **`D`** below);
 - the canonical joint-name map of contract §2, and the two smoothing constants
@@ -85,10 +82,8 @@ is frozen, so a caller cannot pass a third. yaml-cpp does the parsing
 enum comments abbreviate those links in *coordinate* numbering (`K5_tip`,
 `K6_tilt`, `K7_rotator`); the descriptions number their links K0…K8 in *link*
 numbering, which `wiki/robot_model.md` §0.1 warns is not the same sequence.
-`Frame::World` and `Frame::ToolContact` are not in every description —
-`tool_contact_point` is a 7040 link and no crane description carries `world` —
-and a frame the description does not carry returns `FrameUnavailable` rather
-than a substituted pose.
+`Frame::World` is in no crane description, and a frame the description does not
+carry returns `FrameUnavailable` rather than a substituted pose.
 
 `forward_kinematics(q, from, to)` returns the pose of `to` expressed in `from`,
 and labels it `expressed_in = from`. `jacobian(q, frame)` returns the 6×8
@@ -126,9 +121,9 @@ is what says so: it checks $\tfrac12 \dot q^{\mathsf T}\mat M\dot q$ against
 Pinocchio's kinetic energy of the same description, an algorithm that never forms
 a mass matrix.
 
-Everything else the description carries and this API does not — the four cylinder
-sub-chains, and the 7040's driven inner jaw — stays at its neutral configuration
-with zero velocity, exactly as it does for forward kinematics. Those bodies do
+Everything else the description carries and this API does not — the four
+cylinder sub-chains — stays at its neutral configuration with zero velocity,
+exactly as it does for forward kinematics. Those bodies do
 carry mass (about 166 kg of boom cylinder and 118 kg of arm cylinder), so they
 contribute inertia at a placement the closed linkage would not put them at. The
 description closes those loops only in Gazebo; that is a property of the
@@ -145,9 +140,8 @@ recorded-trajectory parity campaign is for.
 - **Gravity** is `ModelConfig::gravity_m_s2`, written into `model.gravity` at
   construction. Nothing here compiles in a 9.81.
 - **`D`** is read from the selected description's `<dynamics damping>`, per
-  `wiki/implementation/parameters.md` §1 and §5 — which is also what makes the
-  passive damping tool-dependent without a table in this file, since the two
-  descriptions carry §5's hand-tuned per-tool values. Two deliberate departures:
+  `wiki/implementation/parameters.md` §1 and §5 — which is what keeps §5's
+  hand-tuned passive damping out of this file. Two deliberate departures:
   - **the telescope entry is zero**, and it is zero because
     `config/hydraulics.yaml` says so. `damping_overrides` is a table of
     `{joint, d, reason}`; `parse` applies whatever is on it and knows nothing
@@ -157,8 +151,7 @@ recorded-trajectory parity campaign is for.
     anywhere in the vault, so the entry is zero rather than a guess.
   - **the mimicked joints' own damping is not added.** §5 tabulates damping per
     machine axis, and the mirrored rail's entry is the same simulation number
-    duplicated for Gazebo; adding it would silently double the PZS100 tool axis
-    and leave the 7040 alone.
+    duplicated for Gazebo; adding it would silently double the PZS100 tool axis.
   Coulomb friction, which the description also carries, is not applied: the
   equation of motion of §1 has a viscous term and nothing else.
 
@@ -511,8 +504,7 @@ disagreement in them cancels everywhere else:
 The spread of points covers configurations, velocities and payloads, and includes
 one per axis where a cylinder geometry is close to degenerate: `q2 = 2.38` is
 0.018 rad from where the boom four-bar stops closing, `q3 = 1.84` is where the
-arm ratio passes through zero, and the 7040's tool coordinate is pinned 0.0023
-rad from the jaw transmission's reversal. One state has every axis at rest, which
+arm ratio passes through zero. One state has every axis at rest, which
 is where mpc §3.1's smoothing is the whole of the difference in $\vec Q$.
 
 ### Regenerating the fixture
@@ -550,10 +542,10 @@ The mock target is exported only when `BUILD_TESTING=ON`. Deployment builds
 must use `BUILD_TESTING=OFF` and must not install or depend on test fixtures.
 The production public API must remain free of ROS and backend-specific types.
 
-`test/description/` holds the two expanded machine descriptions the contract
-test builds real models from, one per tool. They are generated, never
-hand-edited; each file's header carries the `xacro` command that produced it.
-Regenerate them when `epsilon_crane_description` or a tool description changes —
+`test/description/` holds the expanded machine description the contract test
+builds a real model from. It is generated, never hand-edited; its header carries
+the `xacro` command that produced it.
+Regenerate it when `epsilon_crane_description` or the tool description changes —
 `LinkagePlacementsAgreeWithTheCompiledConstants` and
 `CylinderTransmissionFollowsTheDescriptionsGeometry` then say whether
 `config/hydraulics.yaml`'s linkage geometry still agrees with the description, and
@@ -563,10 +555,8 @@ When it fails, re-run the derivation rather than editing the fit:
 ```bash
 ./scripts/derive_collision_model.py \
   --description pzs100=test/description/pzs100.urdf \
-  --description 7040=test/description/epsilon_7040.urdf \
   --package epsilon_crane_description=../../src/epsilon_crane_description \
   --package pzs100_description=../../src/crane_tools_description/pzs100 \
-  --package epsilon_7040_description=../../src/crane_tools_description/7040 \
   --write-srdf config/allowed_collisions.srdf
 ```
 

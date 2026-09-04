@@ -20,14 +20,11 @@ ROOT = os.path.dirname(HERE)
 HYDRAULICS = os.path.join(ROOT, "config", "hydraulics.yaml")
 COLLISION = os.path.join(ROOT, "config", "collision_model.yaml")
 
-DESCRIPTIONS = {
-    Tool.PZS100: os.path.join(HERE, "description", "pzs100.urdf"),
-    Tool.EPSILON_7040: os.path.join(HERE, "description", "epsilon_7040.urdf"),
-}
+DESCRIPTION = os.path.join(HERE, "description", "pzs100.urdf")
 
 
 def build(tool):
-    with open(DESCRIPTIONS[tool], encoding="utf-8") as handle:
+    with open(DESCRIPTION, encoding="utf-8") as handle:
         return CraneModel(
             handle.read(),
             tool,
@@ -45,11 +42,11 @@ def box(identifier, position, side=0.6):
     )
 
 
-@pytest.mark.parametrize("tool", list(Tool))
-def test_every_fitted_primitive_names_a_link_the_description_carries(tool):
+def test_every_fitted_primitive_names_a_link_the_description_carries():
     """A description that moves a link would otherwise keep a stale fit silently."""
     with open(COLLISION, encoding="utf-8") as handle:
         table = yaml.safe_load(handle)
+    tool = Tool.PZS100
     model = build(tool)._model
     fitted = [e for e in table["primitives"] if e["tool"] == tool.value]
     assert fitted, f"the table carries no primitives for {tool.value}"

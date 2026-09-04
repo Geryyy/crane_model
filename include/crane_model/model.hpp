@@ -42,7 +42,7 @@ using FullMass = Eigen::Matrix<double, 8, 8>;
 using PassiveMass = Eigen::Matrix<double, 2, 2>;
 using ReducedMass = Eigen::Matrix<double, 6, 6>;
 
-enum class Tool : std::uint8_t { Pzs100, Epsilon7040 };
+enum class Tool : std::uint8_t { Pzs100 };
 
 enum class Frame : std::uint8_t {
   World,
@@ -56,7 +56,6 @@ enum class Frame : std::uint8_t {
   Rotator,
   RotatorLowerPart,
   Tcp,
-  ToolContact,
 };
 
 struct Payload

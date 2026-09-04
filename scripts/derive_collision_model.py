@@ -27,10 +27,8 @@ Usage:
 
     ./scripts/derive_collision_model.py \
         --description pzs100=test/description/pzs100.urdf \
-        --description 7040=test/description/epsilon_7040.urdf \
         --package epsilon_crane_description=../../src/epsilon_crane_description \
         --package pzs100_description=../../src/crane_tools_description/pzs100 \
-        --package epsilon_7040_description=../../src/crane_tools_description/7040 \
         --write-srdf config/allowed_collisions.srdf
 """
 
@@ -46,11 +44,10 @@ from pathlib import Path
 import coal
 import numpy as np
 
-# The eight canonical coordinates of the model API contract §2 per tool. Every
-# other movable joint stays at its neutral value, exactly as `Model::Impl::
-# write_configuration` leaves it: the cylinder sub-chains and the driven inner
-# jaw are loops the description closes only in Gazebo and carry no collision
-# geometry.
+# The eight canonical coordinates of the model API contract §2. Every other
+# movable joint stays at its neutral value, exactly as `Model::Impl::
+# write_configuration` leaves it: the cylinder sub-chains are loops the
+# description closes only in Gazebo and carry no collision geometry.
 CANONICAL = [
     "theta1_slewing_joint",
     "theta2_boom_joint",
@@ -60,7 +57,9 @@ CANONICAL = [
     "theta7_tilt_joint",
     "theta8_rotator_joint",
 ]
-TOOL_JOINT = {"pzs100": "q9_left_rail_joint", "7040": "theta10_outer_jaw_joint"}
+TOOL_JOINT = "q9_left_rail_joint"
+# The `Tool` enumerator each --description key stands for.
+TOOL_ENUM = {"pzs100": "Pzs100"}
 
 # A `continuous` joint has no limit element; it turns all the way round.
 CONTINUOUS_RANGE = (-math.pi, math.pi)
@@ -433,12 +432,7 @@ def derive_matrix(
 ) -> dict[tuple[str, str], str]:
     """Return the disabled pairs and why, in the categories the legacy SRDF uses."""
     links = collision_links(shapes)
-    tool_joint = (
-        TOOL_JOINT["pzs100"]
-        if "q9_left_rail_joint" in description.joints
-        else TOOL_JOINT["7040"]
-    )
-    movable = CANONICAL + [tool_joint]
+    movable = CANONICAL + [TOOL_JOINT]
     lower = np.array([description.limits(name)[0] for name in movable])
     upper = np.array([description.limits(name)[1] for name in movable])
 
@@ -527,7 +521,7 @@ def cxx_table(fits: dict[str, dict[str, tuple[Primitive, dict]]]) -> str:
                 "    {{{:.9f}, {:.9f}, {:.9f}, {:.9f}}},\n"
                 "{},\n"
                 "    {{{:.6f}, {:.6f}, {:.6f}, {:.9f}, {:.9f}, {:.9f}}}}},".format(
-                    "Pzs100" if tool == "pzs100" else "Epsilon7040",
+                    TOOL_ENUM[tool],
                     link,
                     "Capsule" if shape.kind == "capsule" else "Box",
                     *extents,

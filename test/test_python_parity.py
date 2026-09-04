@@ -16,14 +16,11 @@ ROOT = os.path.dirname(HERE)
 CONFIG = os.path.join(ROOT, "config", "hydraulics.yaml")
 TOLERANCE_M = 1e-9
 
-DESCRIPTIONS = {
-    Tool.PZS100: os.path.join(HERE, "description", "pzs100.urdf"),
-    Tool.EPSILON_7040: os.path.join(HERE, "description", "epsilon_7040.urdf"),
-}
+DESCRIPTION = os.path.join(HERE, "description", "pzs100.urdf")
 
 
 def build(tool):
-    with open(DESCRIPTIONS[tool], encoding="utf-8") as handle:
+    with open(DESCRIPTION, encoding="utf-8") as handle:
         return CraneModel(handle.read(), tool, hydraulics_config=CONFIG)
 
 
@@ -62,11 +59,10 @@ def test_k8_orientation_matches_the_recorded_fixture(fixture_rows):
         )
 
 
-@pytest.mark.parametrize("tool", list(Tool))
-def test_the_telescope_moves_the_tool_twice(tool):
+def test_the_telescope_moves_the_tool_twice():
     """q5_small_telescope mimics q4, so the tool travels 2*q4 and Jacobian
     column 3 carries both stages. Contract section 2; issue 030."""
-    model = build(tool)
+    model = build(Tool.PZS100)
     q = np.zeros(8)
     rest = model.forward_kinematics(q, Frame.MOUNTING_BASE, Frame.TCP).position_m
     q[3] = 0.4
@@ -75,21 +71,6 @@ def test_the_telescope_moves_the_tool_twice(tool):
     assert np.linalg.norm(model.jacobian(q, Frame.TCP).value[:, 3]) == pytest.approx(
         2.0, abs=1e-9
     )
-
-
-def test_tool_contact_is_a_frame_on_the_7040_and_a_refusal_on_the_pzs100():
-    """Same call, real pose on one tool and a refusal on the other; a planner
-    that assumes it works refuses every PZS100 plan. Issues 030, 040."""
-    q = np.zeros(8)
-    pose = build(Tool.EPSILON_7040).forward_kinematics(
-        q, Frame.MOUNTING_BASE, Frame.TOOL_CONTACT
-    )
-    assert np.all(np.isfinite(pose.position_m))
-    with pytest.raises(CraneModelError) as refusal:
-        build(Tool.PZS100).forward_kinematics(
-            q, Frame.MOUNTING_BASE, Frame.TOOL_CONTACT
-        )
-    assert refusal.value.code is ErrorCode.FRAME_UNAVAILABLE
 
 
 def test_the_rotator_wraps_rather_than_stopping(fixture_rows):
@@ -109,12 +90,11 @@ def test_the_rotator_wraps_rather_than_stopping(fixture_rows):
     )
 
 
-@pytest.mark.parametrize("tool", list(Tool))
-def test_a_description_without_the_canonical_joints_is_refused(tool):
+def test_a_description_without_the_canonical_joints_is_refused():
     with pytest.raises(CraneModelError) as refusal:
         CraneModel(
             '<robot name="stub"><link name="only"/></robot>',
-            tool,
+            Tool.PZS100,
             hydraulics_config=CONFIG,
         )
     assert refusal.value.code in (

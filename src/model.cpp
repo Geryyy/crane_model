@@ -238,35 +238,19 @@ Status load(const std::string& path, Constants& out)
   value.arm_ps4_y = reader.number("arm.pS4.y");
   value.arm_ps4_z = reader.number("arm.pS4.z");
 
-  value.jaw_p0 = reader.number("jaw.mirror.p0");
-  value.jaw_p1 = reader.number("jaw.mirror.p1");
-  value.jaw_p2 = reader.number("jaw.mirror.p2");
-  value.jaw_a9 = reader.number("jaw.a9");
-  value.jaw_a10 = reader.number("jaw.a10");
-  value.jaw_a11 = reader.number("jaw.a11");
-  value.jaw_a12 = reader.number("jaw.a12");
-  value.jaw_ps7_x = reader.number("jaw.pS7.x");
-  value.jaw_ps7_y = reader.number("jaw.pS7.y");
-  value.jaw_ps8_x = reader.number("jaw.pS8.x");
-  value.jaw_ps8_y = reader.number("jaw.pS8.y");
-
   value.eps_abs = reader.number("smoothing.eps_abs");
   value.eps_v = reader.number("smoothing.eps_v");
 
-  // The canonical eight of contract §2. The first seven are shared and the
-  // eighth is the tool joint, which is the whole of the map's tool dependence.
-  const YAML::Node shared = reader.sequence("joints.shared", kGeneralizedDof - 1);
-  for (std::size_t index = 0; index + 1 < kGeneralizedDof && shared.IsDefined(); ++index) {
+  // The canonical eight of contract §2, in contract order.
+  const YAML::Node names = reader.sequence("joints", kGeneralizedDof);
+  for (std::size_t index = 0; index < kGeneralizedDof && names.IsDefined(); ++index) {
     std::string name;
-    if (!YAML::convert<std::string>::decode(shared[index], name) || name.empty()) {
-      reader.fail("joints.shared", "carries an entry that is not a joint name");
+    if (!YAML::convert<std::string>::decode(names[index], name) || name.empty()) {
+      reader.fail("joints", "carries an entry that is not a joint name");
       break;
     }
-    value.pzs100_joints[index] = name;
-    value.epsilon7040_joints[index] = name;
+    value.joints[index] = name;
   }
-  value.pzs100_joints[kGeneralizedDof - 1] = reader.text("joints.tool.pzs100");
-  value.epsilon7040_joints[kGeneralizedDof - 1] = reader.text("joints.tool.epsilon7040");
 
   // The damping table. A reason is mandatory: an override with no recorded
   // reason is indistinguishable from a typo, and this is the one place in the
@@ -312,7 +296,7 @@ bool finite(const Eigen::MatrixBase<Derived>& value)
 
 bool valid_tool(Tool tool)
 {
-  return tool == Tool::Pzs100 || tool == Tool::Epsilon7040;
+  return tool == Tool::Pzs100;
 }
 
 // The Frame -> URDF link map of the model API contract §3, written down once.
@@ -321,11 +305,10 @@ bool valid_tool(Tool tool)
 // links K0..K8 in *link* numbering, which robot_model §0.1 warns is not the
 // same sequence. The spellings below are the ones the URDF actually carries.
 //
-// `world` and `tool_contact_point` are not in every description: only the 7040
-// gripper defines a contact point, and the world-to-K0 step is the world-model
-// boundary of contract §8 and stays outside this library. Both resolve to
+// `world` is not in any description: the world-to-K0 step is the world-model
+// boundary of contract §8 and stays outside this library. It resolves to
 // FrameUnavailable rather than to a substituted pose.
-constexpr std::size_t kFrameCount = 12;
+constexpr std::size_t kFrameCount = 11;
 
 struct FrameLink
 {
@@ -345,7 +328,6 @@ constexpr std::array<FrameLink, kFrameCount> kFrameLinks{{
   {Frame::Rotator, "K7_rotator_upper_part"},
   {Frame::RotatorLowerPart, "K8_rotator_lower_part"},
   {Frame::Tcp, "K8_tool_center_point"},
-  {Frame::ToolContact, "tool_contact_point"},
 }};
 
 constexpr bool frame_table_is_ordered()
@@ -388,10 +370,10 @@ using detail::kPassiveRows;
 // A configuration at which a linkage does not close leaves its ratio
 // non-finite rather than raising a flag, because the symbolic instantiation has
 // no configuration to raise one at. Here that non-finite ratio is this
-// configuration's `SingularConfiguration`, named per axis; the three constant
+// configuration's `SingularConfiguration`, named per axis; the four constant
 // axes cannot reach it.
 Status fill_cylinder_jacobian(
-  const hydraulics::Constants& constants, Tool tool, const Q& q, ActuatedJacobian& jacobian)
+  const hydraulics::Constants& constants, const Q& q, ActuatedJacobian& jacobian)
 {
   if (!finite(q)) {
     return failure(ErrorCode::NonFiniteInput, "q is not finite");
@@ -402,10 +384,10 @@ Status fill_cylinder_jacobian(
     "the arm cylinder is degenerate at this q3",
     "the telescope cylinder is degenerate",
     "the rotator motor is degenerate",
-    "the 7040 jaw cylinder is degenerate at this q8"}};
+    "the tool cylinder is degenerate"}};
 
   const std::array<double, kActuatedDof> diagonal =
-    cylinder::jacobian_diagonal(constants, tool, q[1], q[2], q[7]);
+    cylinder::jacobian_diagonal(constants, q[1], q[2]);
   jacobian.setZero();
   for (std::size_t axis = 0; axis < kActuatedDof; ++axis) {
     if (!std::isfinite(diagonal[axis])) {
@@ -577,7 +559,7 @@ Status factorise_passive_mass(const PassiveMass& M_uu, Eigen::LLT<PassiveMass>& 
 // precision leaves a noise floor near 1e-13 N m; against a restoring stiffness of
 // 2e3 N m/rad this tolerance is an angle error below 1e-11 rad, and it is
 // reported in the README as the model's own residual bound. It is two decades
-// above the achieved residual on both descriptions and five below the 1e-6 N m
+// above the achieved residual on the description and five below the 1e-6 N m
 // the invariant of contract §7 is asserted at.
 constexpr double kEquilibriumResidual = 1.0e-8;
 
@@ -885,7 +867,7 @@ Status parse(const ModelConfig& config, ParsedModel& out)
   out.neutral = pinocchio::neutral(out.model);
   out.tool = config.tool;
 
-  const std::array<std::string, kGeneralizedDof>& canonical = out.constants.joints(config.tool);
+  const std::array<std::string, kGeneralizedDof>& canonical = out.constants.joints;
   for (std::size_t index = 0; index < kGeneralizedDof; ++index) {
     Status status = bind_joint(out.model, canonical[index], out.joints[index]);
     if (!status.ok()) {
@@ -1082,9 +1064,9 @@ struct Model::Impl
   }
 
   // Joints outside the canonical eight keep their neutral value: the four
-  // cylinder sub-chains and the 7040's driven inner jaw are loops the
-  // description closes only in Gazebo, so their configuration is not a function
-  // of q and does not move any frame this API exposes.
+  // cylinder sub-chains are loops the description closes only in Gazebo, so
+  // their configuration is not a function of q and does not move any frame this
+  // API exposes.
   void write_configuration(const Q& q)
   {
     configuration = neutral;
@@ -1550,7 +1532,7 @@ Result<Model> Model::create(const ModelConfig& config)
   // frame table and the collision geometry -- and the symbolic graph does not.
   auto impl = std::make_unique<Impl>(std::move(source.model));
   impl->tool = source.tool;
-  impl->names = source.constants.joints(source.tool);
+  impl->names = source.constants.joints;
   impl->constants = source.constants;
   impl->areas = cylinder::axis_areas(source.constants);
   impl->joints = source.joints;
@@ -1656,7 +1638,7 @@ Result<ActuatedJacobian> Model::cylinder_jacobian(const Q& q) const
     return Result<ActuatedJacobian>::failure(not_ready());
   }
   ActuatedJacobian jacobian;
-  Status status = fill_cylinder_jacobian(impl_->constants, impl_->tool, q, jacobian);
+  Status status = fill_cylinder_jacobian(impl_->constants, q, jacobian);
   if (!status.ok()) {
     return Result<ActuatedJacobian>::failure(std::move(status));
   }
@@ -1679,8 +1661,7 @@ Result<CylinderTransmission> Model::transmission(
   }
 
   CylinderTransmission result;
-  status = fill_cylinder_jacobian(
-    impl_->constants, impl_->tool, q, result.joint_to_cylinder);
+  status = fill_cylinder_jacobian(impl_->constants, q, result.joint_to_cylinder);
   if (!status.ok()) {
     return Result<CylinderTransmission>::failure(std::move(status));
   }

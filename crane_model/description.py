@@ -101,7 +101,7 @@ def parse(
         raise CraneModelError(ErrorCode.INVALID_ROBOT_DESCRIPTION, str(exc)) from exc
     model.gravity.linear = np.asarray(gravity_m_s2, dtype=float)
 
-    names = tuple(names) if names else canonical_joints(tool, hydraulics_config)
+    names = tuple(names) if names else canonical_joints(hydraulics_config)
     drives: list[list[Drive]] = [[Drive(_bind(model, name))] for name in names]
 
     # One physical degree of freedom, several description joints.

@@ -56,120 +56,9 @@ struct LinkPrimitive
   std::array<double, 6> source_pose;   // that element's origin, xyz then rpy
 };
 
-inline constexpr std::size_t kLinkPrimitiveCount = 30;
+inline constexpr std::size_t kLinkPrimitiveCount = 15;
 
 inline constexpr std::array<LinkPrimitive, kLinkPrimitiveCount> kLinkPrimitives{{
-  {Tool::Epsilon7040, "K0_mounting_base",
-    LinkShape::Box,
-    {2.266948, 0.797056, 0.408198},
-    {-0.143463, 0.349672, -0.223394},
-    {0.453228552, -0.459227828, -0.538705081, 0.541747651},
-    "mesh:package://epsilon_crane_description/meshes/collision_mounting_base.stl@0.001,0.001,0.001",
-    {-0.315000, 0.350000, 0.148500, 1.570796327, 0.000000000, 0.000000000}},
-  {Tool::Epsilon7040, "K10_outer_jaw",
-    LinkShape::Box,
-    {0.302021, 0.467017, 0.190695},
-    {-0.424341, -0.120811, -0.000028},
-    {-0.548785083, 0.445304830, 0.491952260, 0.508450111},
-    "mesh:package://epsilon_7040_description/meshes/collision_outer_jaw.stl@0.001,0.001,0.001",
-    {-0.836380, -0.113370, 0.000000, 0.000000000, 0.000000000, -0.328296427}},
-  {Tool::Epsilon7040, "K12_inner_jaw",
-    LinkShape::Box,
-    {0.442585, 0.227882, 0.188840},
-    {-0.428964, -0.104104, 0.000003},
-    {0.032433874, -0.706149662, 0.706427334, -0.035512258},
-    "mesh:package://epsilon_7040_description/meshes/collision_inner_jaw.stl@0.001,0.001,0.001",
-    {-0.829000, -0.115680, 0.000000, 0.000000000, 0.000000000, -0.248534886}},
-  {Tool::Epsilon7040, "K1_slewing_column",
-    LinkShape::Box,
-    {0.999934, 0.136000, 0.135579},
-    {0.068339, -0.914728, -0.000000},
-    {0.527243253, -0.471184202, -0.471184202, 0.527243253},
-    "mesh:package://epsilon_crane_description/meshes/collision_slewing_column.stl@"
-    "0.001,0.001,0.001",
-    {0.180000, -2.365200, 0.000000, 0.000000000, 0.000000000, 0.000000000}},
-  {Tool::Epsilon7040, "K2_boom",
-    LinkShape::Box,
-    {1.322342, 0.192616, 0.204940},
-    {-2.014769, 0.065974, 0.000094},
-    {0.616467561, -0.032669239, -0.041567978, 0.785603316},
-    "mesh:package://epsilon_crane_description/meshes/collision_boom.stl@0.001,0.001,0.001",
-    {-3.492883, 0.000000, 0.000000, 0.000000000, 0.000000000, -0.101235000}},
-  {Tool::Epsilon7040, "K3_arm",
-    LinkShape::Box,
-    {1.519035, 0.162261, 0.133446},
-    {0.319070, 0.000940, 1.443636},
-    {0.516646139, 0.486030229, 0.520980542, -0.474795385},
-    "mesh:package://epsilon_crane_description/meshes/collision_arm.stl@0.001,0.001,0.001",
-    {0.392500, 0.000000, 0.000000, -1.570796327, -1.570796327, 0.000000000}},
-  {Tool::Epsilon7040, "K4_outer_telescope",
-    LinkShape::Box,
-    {1.510013, 0.093703, 0.078000},
-    {0.290500, 0.000000, -1.581200},
-    {0.499966374, 0.500033623, 0.500033623, -0.499966374},
-    "mesh:package://epsilon_crane_description/meshes/collision_outer_telescope.stl@"
-    "0.001,0.001,0.001",
-    {0.290500, 0.000000, -0.071200, -1.570796327, -1.570796327, 0.000000000}},
-  {Tool::Epsilon7040, "K5_inner_telescope",
-    LinkShape::Box,
-    {1.504409, 0.137035, 0.066000},
-    {0.264529, 1.447720, 0.000000},
-    {-0.695082668, 0.718929819, 0.000000000, 0.000000000},
-    "mesh:package://epsilon_crane_description/meshes/collision_inner_telescope.stl@"
-    "0.001,0.001,0.001",
-    {0.281000, 0.000000, 0.000000, 0.000000000, 0.000000000, -1.570796327}},
-  {Tool::Epsilon7040, "K6_double_joint_link",
-    LinkShape::Box,
-    {0.185387, 0.103836, 0.069430},
-    {0.118307, -0.003869, -0.000305},
-    {0.010059754, 0.003772131, 0.999771462, -0.018482327},
-    "mesh:package://epsilon_crane_description/meshes/collision_double_joint_link.stl@"
-    "0.001,0.001,0.001",
-    {0.000000, 0.000000, 0.000000, 1.570796327, 0.000000000, 0.000000000}},
-  {Tool::Epsilon7040, "K7_rotator_upper_part",
-    LinkShape::Capsule,
-    {0.163801, 0.044935, 0.000000},
-    {-0.000424, -0.007699, 0.118874},
-    {0.706073133, 0.706272194, 0.034345133, -0.038219505},
-    "mesh:package://epsilon_crane_description/meshes/collision_rotator_upper_part_clamp.stl@"
-    "0.001,0.00109,0.001",
-    {0.000000, 0.000000, 0.000000, -1.570796327, 0.000000000, -1.570796327}},
-  {Tool::Epsilon7040, "K8_rotator_lower_part",
-    LinkShape::Box,
-    {0.189872, 0.106714, 0.071277},
-    {0.001910, 0.000083, -0.363300},
-    {0.713453863, 0.700605936, -0.006891080, -0.009349894},
-    "mesh:package://epsilon_crane_description/meshes/collision_rotator_lower_part.stl@"
-    "0.001,0.001,0.001",
-    {0.000000, 0.000000, 0.000000, 0.000000000, 0.000000000, 0.000000000}},
-  {Tool::Epsilon7040, "K8_tool_center_point",
-    LinkShape::Box,
-    {0.394838, 0.200000, 0.233503},
-    {0.000110, 0.008721, -0.103093},
-    {0.707036739, 0.707036737, 0.009952444, -0.009952417},
-    "mesh:package://epsilon_7040_description/meshes/collision_pincer_frame.stl@0.001,0.001,0.001",
-    {0.000000, 0.000000, -0.246800, 0.000000000, 3.141592654, 0.000000000}},
-  {Tool::Epsilon7040, "control_box",
-    LinkShape::Box,
-    {0.550000, 0.400000, 0.225000},
-    {-0.000000, -0.040000, 0.000000},
-    {0.500000000, 0.500000000, 0.500000000, -0.500000000},
-    "box:0.8,0.45,1.1",
-    {0.000000, -0.040000, 0.000000, 0.000000000, 0.000000000, 0.000000000}},
-  {Tool::Epsilon7040, "control_box_sensor_mount",
-    LinkShape::Box,
-    {0.550000, 0.400000, 0.225000},
-    {-0.000000, -0.040000, 0.000000},
-    {0.500000000, 0.500000000, 0.500000000, -0.500000000},
-    "box:0.8,0.45,1.1",
-    {0.000000, -0.040000, 0.000000, 0.000000000, 0.000000000, 0.000000000}},
-  {Tool::Epsilon7040, "hydraulic_block",
-    LinkShape::Box,
-    {0.340000, 0.310000, 0.200000},
-    {-0.000000, 0.000000, 0.000000},
-    {0.500000000, 0.500000000, 0.500000000, 0.500000000},
-    "box:0.4,0.68,0.62",
-    {0.000000, 0.000000, 0.000000, 0.000000000, 0.000000000, 0.000000000}},
   {Tool::Pzs100, "K0_mounting_base",
     LinkShape::Box,
     {2.266948, 0.797056, 0.408198},
@@ -292,7 +181,7 @@ struct LinkPair
   const char * second;
 };
 
-inline constexpr std::size_t kAllowedSelfPairCount = 64;
+inline constexpr std::size_t kAllowedSelfPairCount = 56;
 
 inline constexpr std::array<LinkPair, kAllowedSelfPairCount> kAllowedSelfPairs{{
   {"K0_mounting_base", "K1_slewing_column"},  // Adjacent
@@ -304,14 +193,6 @@ inline constexpr std::array<LinkPair, kAllowedSelfPairCount> kAllowedSelfPairs{{
   {"K10_left_rail", "K7_rotator_upper_part"},  // Default
   {"K10_left_rail", "K8_rotator_lower_part"},  // Default
   {"K10_left_rail", "K8_tool_center_point"},  // Adjacent
-  {"K10_outer_jaw", "K6_double_joint_link"},  // Never
-  {"K10_outer_jaw", "K7_rotator_upper_part"},  // Never
-  {"K10_outer_jaw", "K8_rotator_lower_part"},  // Never
-  {"K10_outer_jaw", "K8_tool_center_point"},  // Adjacent
-  {"K12_inner_jaw", "K6_double_joint_link"},  // Never
-  {"K12_inner_jaw", "K7_rotator_upper_part"},  // Never
-  {"K12_inner_jaw", "K8_rotator_lower_part"},  // Never
-  {"K12_inner_jaw", "K8_tool_center_point"},  // Adjacent
   {"K12_right_rail", "K6_double_joint_link"},  // Never
   {"K12_right_rail", "K7_rotator_upper_part"},  // Default
   {"K12_right_rail", "K8_rotator_lower_part"},  // Default

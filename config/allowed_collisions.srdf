@@ -3,7 +3,6 @@
 
      Derived once, by scripts/derive_collision_model.py, from:
        pzs100: test/description/pzs100.urdf
-       7040: test/description/epsilon_7040.urdf
      and from the primitive fit that same script produces, which is the
      geometry this list filters. It is not read at runtime, because
      crane_model is ROS-free and takes no file path, but it is the
@@ -25,14 +24,6 @@
     <disable_collisions link1="K10_left_rail" link2="K7_rotator_upper_part" reason="Default"/>
     <disable_collisions link1="K10_left_rail" link2="K8_rotator_lower_part" reason="Default"/>
     <disable_collisions link1="K10_left_rail" link2="K8_tool_center_point" reason="Adjacent"/>
-    <disable_collisions link1="K10_outer_jaw" link2="K6_double_joint_link" reason="Never"/>
-    <disable_collisions link1="K10_outer_jaw" link2="K7_rotator_upper_part" reason="Never"/>
-    <disable_collisions link1="K10_outer_jaw" link2="K8_rotator_lower_part" reason="Never"/>
-    <disable_collisions link1="K10_outer_jaw" link2="K8_tool_center_point" reason="Adjacent"/>
-    <disable_collisions link1="K12_inner_jaw" link2="K6_double_joint_link" reason="Never"/>
-    <disable_collisions link1="K12_inner_jaw" link2="K7_rotator_upper_part" reason="Never"/>
-    <disable_collisions link1="K12_inner_jaw" link2="K8_rotator_lower_part" reason="Never"/>
-    <disable_collisions link1="K12_inner_jaw" link2="K8_tool_center_point" reason="Adjacent"/>
     <disable_collisions link1="K12_right_rail" link2="K6_double_joint_link" reason="Never"/>
     <disable_collisions link1="K12_right_rail" link2="K7_rotator_upper_part" reason="Default"/>
     <disable_collisions link1="K12_right_rail" link2="K8_rotator_lower_part" reason="Default"/>

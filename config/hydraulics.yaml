@@ -10,11 +10,6 @@
 # and `cylinder_force` are public (model API contract §4). This is sharing, not
 # relocation.
 #
-# Every entry names the section of `wiki/hydraulics.md` it came from. The jaw
-# block is the one exception and says so per entry: §2.6 carries that linkage's
-# equations but none of its numbers, so those are ported from the deployed model
-# under `src/` and name the file they came from instead.
-#
 # Units are SI throughout (`wiki/implementation/style_guide.md` §2). Symbols are
 # the `Code` column of `wiki/nomenclature.md` §7 and §10.
 #
@@ -88,44 +83,6 @@ arm:
     y: 0.224          # §6.2, m
     z: 0.468          # §6.2, m; the model rotates -pS4.z
 
-# --- 7040 jaw four-bar, §2.6 --------------------------------------------------
-#
-# §6.2 carries none of these numbers, so each names the deployed file it is
-# ported from instead of a section. None of them is a §6.2 value.
-#
-# The tool axis is still an axis of this model: issue 068 took the tool
-# coordinate out of both OCPs, and `Model::cylinder_jacobian`,
-# `Model::transmission` and `Model::cylinder_force` keep it, so the jaw
-# transmission and the §6.1 tool areas above are still evaluated here.
-jaw:
-  # The fitted mirror law phi_sim,9(q8), which §2.6 says is the variant the
-  # deployed model uses, in the Horner form of
-  # timber_crane_model_cpp/include/timber_crane_model_cpp/maple/
-  # comp_eq_four_bar.hpp:7, with jaw_linkage_p of
-  # crane_tools_description/7040/config/gripper_parameter.yaml:13.
-  mirror:
-    p0: -0.121220     # comp_eq_four_bar.hpp:7, quadratic coefficient, 1/rad
-    p1: 1.400122      # comp_eq_four_bar.hpp:7, linear coefficient, -
-    p2: -0.227867     # comp_eq_four_bar.hpp:7, constant term, rad
-  # The two jaw pivots on the pincer frame and the two jaw arm lengths. The
-  # deployed model reads them from the URDF DH transforms in
-  # timber_crane_parameter/src/parameter_def.cpp:196-206; the joint origins are
-  # in crane_tools_description/7040/urdf/links/. Note a9 and a11 are the y and
-  # a10 and a12 the x coordinate of their origin, per the comment there.
-  a9: 0.328           # parameter_def.cpp:196-206, outer pivot, -dh_trans9 y, m
-  a10: 0.8126         # parameter_def.cpp:196-206, outer arm, dh_trans10 x, m
-  a11: 0.336          # parameter_def.cpp:196-206, inner pivot, dh_trans11 y, m
-  a12: 0.8172         # parameter_def.cpp:196-206, inner arm, dh_trans12 x, m
-  # The jaw cylinder's two attachment points. The barrel end sits on the outer
-  # jaw; the rod end sits on the inner jaw and is hard-coded in the deployed
-  # parameter file because the URDF closes that loop only in Gazebo.
-  pS7:
-    x: -0.8971        # gripper_cylinder_joints.urdf.xacro:15, m
-    y: 0.01754        # gripper_cylinder_joints.urdf.xacro:15, m
-  pS8:
-    x: -0.908397      # gripper_parameter.yaml:5-7, m
-    y: 0.015289       # gripper_parameter.yaml:5-7, m
-
 # --- smoothing of constraint 7, wiki/mpc.md §3.1 ------------------------------
 #
 # Applied to the *model* and never to the inner loop's dead-zone compensator.
@@ -140,22 +97,16 @@ smoothing:
 
 # --- the canonical joint-name map, model API contract §2 ----------------------
 #
-# The canonical eight coordinates as the URDF spells them. Only the eighth is
-# tool-dependent, which is why it is a separate key rather than two full lists:
-# a description that renamed a shared joint would otherwise have to be edited in
-# two places here.
+# The canonical eight coordinates as the URDF spells them, in contract order.
 joints:
-  shared:                      # coordinates 1..7, identical in both descriptions
-    - theta1_slewing_joint
-    - theta2_boom_joint
-    - theta3_arm_joint
-    - q4_big_telescope
-    - theta6_tip_joint
-    - theta7_tilt_joint
-    - theta8_rotator_joint
-  tool:
-    pzs100: q9_left_rail_joint
-    epsilon7040: theta10_outer_jaw_joint
+  - theta1_slewing_joint
+  - theta2_boom_joint
+  - theta3_arm_joint
+  - q4_big_telescope
+  - theta6_tip_joint
+  - theta7_tilt_joint
+  - theta8_rotator_joint
+  - q9_left_rail_joint
 
 # --- per-joint damping overrides ----------------------------------------------
 #

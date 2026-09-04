@@ -1,10 +1,13 @@
-"""Expand the current crane xacros into crane_model's test descriptions."""
+"""Expand the current crane xacro into crane_model's test description."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
-from launch.substitutions import FindExecutable, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    FindExecutable,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+)
 from launch_ros.substitutions import FindPackageShare
-
 
 DESCRIPTION_PACKAGE = "epsilon_crane_description"
 DESCRIPTION_FILE = "crane_description.urdf.xacro"
@@ -35,7 +38,7 @@ def _xacro_process(tool, output_name):
 
 
 def generate_launch_description():
-    """Generate both URDF fixtures from the current source xacros."""
+    """Generate the URDF fixture from the current source xacro."""
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -48,11 +51,10 @@ def generate_launch_description():
             ),
             LogInfo(
                 msg=(
-                    "Generating pzs100.urdf and epsilon_7040.urdf from "
+                    "Generating pzs100.urdf from "
                     "epsilon_crane_description/urdf/crane_description.urdf.xacro"
                 )
             ),
             _xacro_process("pzs100_description", "pzs100.urdf"),
-            _xacro_process("epsilon_7040_description", "epsilon_7040.urdf"),
         ]
     )
