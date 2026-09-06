@@ -65,6 +65,29 @@ def default_hydraulics_path() -> str:
         return os.path.join(here, "config", "hydraulics.yaml")
 
 
+def default_actuator_path() -> str:
+    """
+    Locate config/c3_full_model.json, installed first, else the source tree.
+
+    The file is the C3 fit of wiki/hydraulic_actuator_model.md §2, copied here
+    byte for byte because wiki/ is not reachable from an installed package and
+    crane_planning imports this module from the install space. Issue 118 is what
+    replaces the copy with a single read.
+    """
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        installed = os.path.join(
+            get_package_share_directory("crane_model"), "config", "c3_full_model.json"
+        )
+        if os.path.exists(installed):
+            return installed
+    except Exception:
+        pass
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(here, "config", "c3_full_model.json")
+
+
 def canonical_joints(config_path: str | None = None) -> tuple[str, ...]:
     """Read the eight canonical joint names in contract order."""
     with open(config_path or default_hydraulics_path(), encoding="utf-8") as handle:

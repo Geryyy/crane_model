@@ -55,6 +55,7 @@ carries both, and says which is which everywhere:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -64,7 +65,7 @@ import pinocchio as pin
 import pinocchio.casadi as cpin
 import yaml
 
-from .conventions import Tool, default_hydraulics_path
+from .conventions import Tool, default_actuator_path, default_hydraulics_path
 from .description import parse as parse_description
 
 # --- the canonical eight of the model API contract §2 -------------------------
@@ -91,7 +92,9 @@ K_PLANNED_DOF = K_ACTUATED_DOF - 1
 K_PLANNED_ROWS = K_ACTUATED_ROWS[:K_PLANNED_DOF]
 K_PLANNED_AXES = tuple(range(K_PLANNED_DOF))
 
-NX = 2 * K_PLANNED_DOF + 2 * K_PASSIVE_DOF
+# The rigid-body half of `x`: what the state was before the actuator arrived,
+# and what a consumer built without one still gets.
+NX_RIGID = 2 * K_PLANNED_DOF + 2 * K_PASSIVE_DOF
 NU = K_PLANNED_DOF
 
 # The blocks of `x`, in the order `crane_mpc/src/ocp.cpp` reduces to and expands
@@ -100,6 +103,90 @@ X_PLANNED_POSITION = 0
 X_PASSIVE_POSITION = K_PLANNED_DOF
 X_PLANNED_VELOCITY = K_PLANNED_DOF + K_PASSIVE_DOF
 X_PASSIVE_VELOCITY = 2 * K_PLANNED_DOF + K_PASSIVE_DOF
+
+# --- C3, `wiki/hydraulic_actuator_model.md` §1 -------------------------------
+#
+# The fit's own keys for the five planned axes, in `K_PLANNED_AXES` order. The
+# gripper is in the file and is not planned here, so it is not in this tuple.
+K_AXIS_KEYS = ("sw", "ha", "ka", "sa", "ro")
+
+
+@dataclass(frozen=True)
+class ActuatorFit:
+    """
+    C3's two fitted numbers per planned axis, in `K_PLANNED_AXES` order.
+
+    `k` is block 3's force-state stiffness and `tau_v` block 2's command lag.
+    Block 1, the 60 ms transport delay, is **not** here: it is common to every
+    axis and it lives in the node's predictor, not on the shooting grid
+    (`docs/features/mpc-full-authority/brief.md` §2.2). Damping is not here
+    either -- it reaches the dynamics through pinocchio's `model.damping` off
+    the description and stays there.
+    """
+
+    k: tuple[float, ...]
+    tau_v: tuple[float, ...]
+    dead_time_s: float
+
+    @property
+    def lag_axes(self) -> tuple[int, ...]:
+        """The axes that get a `u_f` state. `tau_v = 0` is a pole at infinity."""
+        return tuple(axis for axis in K_PLANNED_AXES if self.tau_v[axis] > 0.0)
+
+
+def load_actuator_fit(path=None) -> ActuatorFit:
+    """
+    Read `config/c3_full_model.json`, the fit of `hydraulic_actuator_model.md` §2.
+
+    A missing axis or a non-positive `k` is an exception and never a default, for
+    the same reason `load_constants` refuses one: a wrong actuator constant is a
+    wrong command, and it would be invisible in every quantity except the
+    response.
+    """
+    path = Path(path) if path is not None else Path(default_actuator_path())
+    with open(path) as stream:
+        root = json.load(stream)
+    axes = root.get("axes")
+    if not isinstance(axes, dict):
+        raise ValueError(f"{path}: carries no axes mapping")
+
+    k, tau_v = [], []
+    for key in K_AXIS_KEYS:
+        if key not in axes:
+            raise ValueError(f"{path}: no fit for axis {key!r}")
+        entry = axes[key]
+        stiffness = float(entry["k"])
+        lag = float(entry["tau_v"])
+        if not (stiffness > 0.0) or lag < 0.0:
+            raise ValueError(
+                f"{path}: axis {key!r} has k={stiffness} tau_v={lag}; k must be "
+                f"positive and tau_v non-negative"
+            )
+        k.append(stiffness)
+        tau_v.append(lag)
+    return ActuatorFit(
+        k=tuple(k),
+        tau_v=tuple(tau_v),
+        dead_time_s=float(root["dead_time_common_ms"]) * 1.0e-3,
+    )
+
+
+#: The fit as shipped. Read once, at import, because `NX` is derived from it.
+K_ACTUATOR_FIT = load_actuator_fit()
+
+#: The axes that carry a command-lag state, derived from the fit the way
+#: `K_PLANNED_AXES` is derived from the partition -- never written out by hand.
+#: `ka` (the arm) is fitted at `tau_v = 0`, so it has no `u_f` state and its
+#: `u_f` *is* `u`.
+K_LAG_AXES = K_ACTUATOR_FIT.lag_axes
+K_COMMAND_LAG_DOF = len(K_LAG_AXES)
+
+# The C3 state, extending the rigid-body offsets above rather than renumbering
+# them: the lagged command on the axes that have one, then the force state on
+# every planned axis.
+X_COMMAND_LAG = NX_RIGID
+X_ACTUATED_FORCE = NX_RIGID + K_COMMAND_LAG_DOF
+NX = NX_RIGID + K_COMMAND_LAG_DOF + K_PLANNED_DOF
 
 # --- the parameter vector -----------------------------------------------------
 #
@@ -637,29 +724,29 @@ class CraneSymbolicModel:
         tool: str,
         constants: Constants | None = None,
         gravity=(0.0, 0.0, -9.81),
+        actuator: ActuatorFit | None = None,
     ):
         self.constants = constants if constants is not None else load_constants()
         self.description = parse(description_xml, tool, self.constants, gravity)
         self.tool = tool
+        self.actuator = actuator
 
         # --- the symbols -----------------------------------------------------
-        self.x = ca.SX.sym("x", NX)
+        self.x = ca.SX.sym("x", NX if actuator is not None else NX_RIGID)
         self.u = ca.SX.sym("u", NU)
         self.p = ca.SX.sym("p", NP)
         self.q_tool = self.p[P_TOOL_POSITION]
         self.payload = self.p[P_PAYLOAD_MASS:NP]
 
-        # The canonical eight, put back together out of the fourteen this
-        # problem plans and the pinned tool coordinate. The tool's rate and its
-        # acceleration are zero -- the gripper is held by the low-level
-        # controller, so no plan written against this model can move it.
+        # The canonical eight, put back together out of what this problem plans
+        # and the pinned tool coordinate. The tool's rate and its acceleration
+        # are zero -- the gripper is held by the low-level controller, so no plan
+        # written against this model can move it.
         self.q = ca.SX.zeros(K_GENERALIZED_DOF)
         self.dq = ca.SX.zeros(K_GENERALIZED_DOF)
-        self.ddq_a = ca.SX.zeros(K_ACTUATED_DOF)
         for axis, row in enumerate(K_PLANNED_ROWS):
             self.q[row] = self.x[X_PLANNED_POSITION + axis]
             self.dq[row] = self.x[X_PLANNED_VELOCITY + axis]
-            self.ddq_a[axis] = self.u[axis]
         for index, row in enumerate(K_PASSIVE_ROWS):
             self.q[row] = self.x[X_PASSIVE_POSITION + index]
             self.dq[row] = self.x[X_PASSIVE_VELOCITY + index]
@@ -673,30 +760,129 @@ class CraneSymbolicModel:
         self.mass_ua = m_ua[:, K_PLANNED_AXES]
         self.bias_u = h_u
 
-        # `wiki/robot_model.md` §3.1: ddq_u = -M_uu⁻¹ (M_ua ddq_a + h_u), with
-        # h_u already carrying D_uu dq_u. Two by two, so the inverse is the
-        # adjugate and there is no factorisation to branch on -- a configuration
-        # where M_uu is singular leaves a non-finite expression.
-        right_hand = h_u + ca.mtimes(m_ua, self.ddq_a)
-        determinant = m_uu[0, 0] * m_uu[1, 1] - m_uu[0, 1] * m_uu[1, 0]
-        self.ddq_u = ca.vertcat(
-            -(m_uu[1, 1] * right_hand[0] - m_uu[0, 1] * right_hand[1]) / determinant,
-            -(m_uu[0, 0] * right_hand[1] - m_uu[1, 0] * right_hand[0]) / determinant,
-        )
+        planned = list(K_PLANNED_AXES)
+        self.ddq_a = ca.SX.zeros(K_ACTUATED_DOF)
+        if actuator is None:
+            # No actuator: the input *is* the actuated acceleration, the passive
+            # rows follow it, and `tau_a` is the inverse dynamics that produced
+            # it. This is the map `crane_planning`'s timing OCP inverts.
+            for axis in K_PLANNED_AXES:
+                self.ddq_a[axis] = self.u[axis]
 
-        # tau_a of §3.3, the actuated rows of M ddq + h at the consistent passive
-        # acceleration. It equals M_eff u + h_eff of §3.4 and is the quantity
-        # `wiki/mpc.md` §2's effort term and §3's constraint 6 are written in.
-        self.tau_a = h_a + ca.mtimes(m_aa, self.ddq_a) + ca.mtimes(m_au, self.ddq_u)
+            # `wiki/robot_model.md` §3.1: ddq_u = -M_uu⁻¹ (M_ua ddq_a + h_u),
+            # with h_u already carrying D_uu dq_u. Two by two, so the inverse is
+            # the adjugate and there is no factorisation to branch on -- a
+            # configuration where M_uu is singular leaves a non-finite expression.
+            right_hand = h_u + ca.mtimes(m_ua, self.ddq_a)
+            determinant = m_uu[0, 0] * m_uu[1, 1] - m_uu[0, 1] * m_uu[1, 0]
+            self.ddq_u = ca.vertcat(
+                -(m_uu[1, 1] * right_hand[0] - m_uu[0, 1] * right_hand[1])
+                / determinant,
+                -(m_uu[0, 0] * right_hand[1] - m_uu[1, 0] * right_hand[0])
+                / determinant,
+            )
+            # tau_a of §3.3, the actuated rows of M ddq + h at the consistent
+            # passive acceleration. It equals M_eff u + h_eff of §3.4 and is the
+            # quantity `wiki/mpc.md` §2's effort term and §3's constraint 6 are
+            # written in.
+            self.tau_a = h_a + ca.mtimes(m_aa, self.ddq_a) + ca.mtimes(m_au, self.ddq_u)
+            self.u_f = self.u
+            self.command_lag_rate = ca.SX.zeros(0)
+            self.actuated_force_rate = ca.SX.zeros(0)
+            self.actuated_force_static = ca.substitute(
+                self.tau_a[:K_PLANNED_DOF], self.u, ca.SX.zeros(NU)
+            )
+            # The rows of xdot in the reduced order. The tool's two rows are
+            # dq_tool = 0 and ddq_tool = 0 by construction and are not carried.
+            self.xdot = ca.vertcat(
+                self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF],
+                self.x[X_PASSIVE_VELOCITY : X_PASSIVE_VELOCITY + K_PASSIVE_DOF],
+                self.u,
+                self.ddq_u,
+            )
+        else:
+            # C3, `wiki/hydraulic_actuator_model.md` §1, blocks 2, 3 and 5. Block
+            # 1, the 60 ms transport delay, is deliberately absent: it is the
+            # node's predictor and putting a second copy here double-counts it.
+            #
+            # Block 2, the PT1 command lag. Only the axes the fit gives a
+            # positive tau_v get a state; on the arm tau_v is zero, which is a
+            # pole at infinity, so its lagged command is the command itself.
+            dq_a = self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF]
+            lag_slot = {axis: slot for slot, axis in enumerate(K_LAG_AXES)}
+            self.u_f = ca.vertcat(
+                *[
+                    self.x[X_COMMAND_LAG + lag_slot[axis]]
+                    if axis in lag_slot
+                    else self.u[axis]
+                    for axis in K_PLANNED_AXES
+                ]
+            )
+            self.command_lag_rate = ca.vertcat(
+                *[
+                    (self.u[axis] - self.u_f[axis]) / actuator.tau_v[axis]
+                    for axis in K_LAG_AXES
+                ]
+            )
 
-        # The rows of xdot in the reduced order. The tool's two rows are
-        # dq_tool = 0 and ddq_tool = 0 by construction and are simply not carried.
-        self.xdot = ca.vertcat(
-            self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF],
-            self.x[X_PASSIVE_VELOCITY : X_PASSIVE_VELOCITY + K_PASSIVE_DOF],
-            self.u,
-            self.ddq_u,
-        )
+            # Block 3, the force state. It is a *state* now, so `tau_a` is read
+            # off `x` rather than assembled -- which is what turns `wiki/mpc.md`
+            # §3's constraint 6 into `x_j / J_c,ii(q)` and drops crba out of it.
+            tau_p = self.x[X_ACTUATED_FORCE : X_ACTUATED_FORCE + K_PLANNED_DOF]
+            self.actuated_force_rate = ca.vertcat(
+                *[
+                    actuator.k[axis] * (self.u_f[axis] - dq_a[axis])
+                    for axis in K_PLANNED_AXES
+                ]
+            )
+
+            # Block 5, the load: forward dynamics, torque to acceleration. This
+            # is ABA's arrow, but **not** `cpin.aba`: the parsed model has 18
+            # velocity rows and a `<mimic>` projection P over them, so ABA on it
+            # would let the four cylinder sub-chains and the mimicked telescope
+            # half move freely. The projected system P'MP ddq + P'h = tau is what
+            # `self.mass`/`self.bias` already are, so forward dynamics here is
+            # one dense solve of it -- seven rows, because the tool coordinate is
+            # pinned at ddq = 0 and its row is a constraint torque nobody reads.
+            m_pp = m_aa[planned, planned]
+            m_pu = m_au[planned, :]
+            system = ca.blockcat([[m_pp, m_pu], [self.mass_ua, m_uu]])
+            solution = ca.solve(system, ca.vertcat(tau_p - h_a[planned], -h_u))
+            ddq_p = solution[:K_PLANNED_DOF]
+            self.ddq_u = solution[K_PLANNED_DOF:]
+            for axis in K_PLANNED_AXES:
+                self.ddq_a[axis] = ddq_p[axis]
+
+            # The tool row of tau_a is still the constraint torque that holds the
+            # gripper still, and the output map reports all six. Only the planned
+            # five come out of the state.
+            tau_tool = (
+                h_a[K_TOOL_AXIS]
+                + ca.mtimes(m_aa[K_TOOL_AXIS, :], self.ddq_a)
+                + ca.mtimes(m_au[K_TOOL_AXIS, :], self.ddq_u)
+            )
+            self.tau_a = ca.vertcat(tau_p, tau_tool)
+
+            # The force state that holds the machine still at this configuration,
+            # i.e. h_eff of `wiki/robot_model.md` §3.4. There is no force
+            # measurement anywhere in the stack, so this is what a consumer seeds
+            # the force state with; seeding it at zero would start every horizon
+            # with the hydraulics switched off and the boom in free fall.
+            determinant = m_uu[0, 0] * m_uu[1, 1] - m_uu[0, 1] * m_uu[1, 0]
+            ddq_u_static = ca.vertcat(
+                -(m_uu[1, 1] * h_u[0] - m_uu[0, 1] * h_u[1]) / determinant,
+                -(m_uu[0, 0] * h_u[1] - m_uu[1, 0] * h_u[0]) / determinant,
+            )
+            self.actuated_force_static = h_a[planned] + ca.mtimes(m_pu, ddq_u_static)
+
+            self.xdot = ca.vertcat(
+                self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF],
+                self.x[X_PASSIVE_VELOCITY : X_PASSIVE_VELOCITY + K_PASSIVE_DOF],
+                ddq_p,
+                self.ddq_u,
+                self.command_lag_rate,
+                self.actuated_force_rate,
+            )
 
         self.cylinder_jacobian = ca.vertcat(
             *jacobian_diagonal(self.constants, self.q[1], self.q[2])
