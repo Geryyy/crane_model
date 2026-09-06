@@ -165,3 +165,25 @@ def test_a_carried_body_ignores_the_grip_and_still_sees_the_world():
     assert result.other_id == "rock"
     away = box("far_rock", at_tool.translation + np.array([6.0, 0.0, 0.0]), side=0.4)
     assert model.collision_queries(q, [payload(True), away])[0].minimum_distance_m > 0.0
+
+
+def test_a_restricted_query_splits_the_machine_at_the_upper_hinge():
+    """
+    The sway envelope is owed by what hangs on the hinges and by nothing else,
+    so a caller must be able to ask the two halves separately. A block at the
+    tool is seen by the swinging half only, one at the base by the rigid half
+    only, and a restricted answer carries no self row.
+    """
+    model = build(Tool.PZS100)
+    q = np.zeros(8)
+    q[7] = 0.35
+    tcp = model.forward_kinematics(q, Frame.MOUNTING_BASE, Frame.TCP).position_m
+    scene = [box("at_tool", tcp), box("at_base", [0.0, 0.0, -1.5])]
+    whole = model.collision_queries(q, scene)
+    swinging = model.collision_queries(q, scene, swinging=True)
+    rigid = model.collision_queries(q, scene, swinging=False)
+    assert len(whole) == 3 and len(swinging) == 2 and len(rigid) == 2
+    assert swinging[0].minimum_distance_m == whole[0].minimum_distance_m
+    assert rigid[0].minimum_distance_m > swinging[0].minimum_distance_m + 0.5
+    assert rigid[1].minimum_distance_m == whole[1].minimum_distance_m
+    assert swinging[1].minimum_distance_m > rigid[1].minimum_distance_m + 0.5

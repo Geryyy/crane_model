@@ -179,6 +179,20 @@ class LinkGeometry:
             or mount not in list(model.supports[model.frames[frame].parentJoint])
         ]
 
+        # Which bodies swing. The tool hangs on two passive hinges, the upper one
+        # placing the double-joint link, so a body swings when the joint that
+        # places it is at or below that hinge. What the sway envelope must be
+        # charged to, and nothing else.
+        hinge = None
+        if model.existFrame(Frame.TILT.value):
+            hinge = model.frames[model.getFrameId(Frame.TILT.value)].parentJoint
+        self.swinging = [
+            index
+            for index, (_, frame, _, _) in enumerate(self.bodies)
+            if hinge is not None
+            and hinge in list(model.supports[model.frames[frame].parentJoint])
+        ]
+
         allowed = {tuple(sorted(pair)) for pair in table["allowed_self_pairs"]}
         self.self_pairs = [
             (i, j)
@@ -205,12 +219,19 @@ def validate_scene(primitives) -> None:
         seen.add(primitive.id)
 
 
-def queries(model, data, geometry: LinkGeometry, configuration, scene) -> list:
+def queries(
+    model, data, geometry: LinkGeometry, configuration, scene, swinging=None
+) -> list:
     """
     Check the scene and the machine against itself.
 
     One result per scene primitive, in scene order, then one for the machine
     against itself. Each is the closest pair found against that object.
+
+    `swinging` restricts the machine to the bodies below the tool's upper
+    passive hinge (True) or to everything above it (False). A restricted query
+    answers the scene rows only -- self-collision is a property of the whole
+    machine and is not split.
 
     A primitive marked `attached_to_tool` is answered differently, and the two
     halves go together. It is not checked against the links that hold it, which
@@ -235,6 +256,11 @@ def queries(model, data, geometry: LinkGeometry, configuration, scene) -> list:
         for link, frame, shape, offset in geometry.bodies
     ]
     detached = [placed[index] for index in geometry.detached]
+    if swinging is not None:
+        keep = set(geometry.swinging)
+        chosen = [index for index in range(len(placed)) if (index in keep) == swinging]
+        detached = [placed[index] for index in chosen if index in geometry.detached]
+        placed = [placed[index] for index in chosen]
     shapes = {other.id: _scene_geometry(other) for other in scene}
 
     def closest(candidates):
@@ -266,7 +292,7 @@ def queries(model, data, geometry: LinkGeometry, configuration, scene) -> list:
             ]
         if pairs:
             results.append(closest(pairs))
-    if geometry.self_pairs:
+    if geometry.self_pairs and swinging is None:
         results.append(
             closest(
                 _distance(
