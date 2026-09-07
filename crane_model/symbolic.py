@@ -46,7 +46,11 @@ carries both, and says which is which everywhere:
   `theta1_slewing`, `theta2_boom`, `theta3_arm`, `q4_big_telescope`,
   `theta6_tip`, `theta7_tilt`, `theta8_rotator`, tool. Indices `K_ACTUATED_ROWS`
   are actuated and `K_PASSIVE_ROWS` are the two passive sway coordinates.
-* `x`, `u` -- what the OCPs plan: `NX = 14` and `NU = 5`. The tool coordinate is
+* `x`, `u` -- what the OCPs plan. Without an actuator that is the rigid
+  `NX_RIGID = 14` and `NU = 5`; with one it is C3's `NX = 25` -- the rigid
+  fourteen, the command lag, the progress pair of
+  `docs/features/mpc-full-authority/brief.md` 2.1 and the force state -- over
+  `NU_PROGRESS = 6`. The tool coordinate is
   not a decision variable, because the gripper is opened and closed by the
   low-level controller; it arrives in the parameter vector `p` and its rate and
   acceleration are zero. **Its link keeps its mass**, which is the whole reason
@@ -95,6 +99,11 @@ K_PLANNED_AXES = tuple(range(K_PLANNED_DOF))
 # The rigid-body half of `x`: what the state was before the actuator arrived,
 # and what a consumer built without one still gets.
 NX_RIGID = 2 * K_PLANNED_DOF + 2 * K_PASSIVE_DOF
+
+# The planned joint-velocity commands. This is what `u` is for a consumer built
+# without an actuator -- `crane_planning`'s timing OCP -- and it stays the name
+# of that block after the progress input arrives below, so nothing downstream
+# that means "one command per planned axis" has to be re-read.
 NU = K_PLANNED_DOF
 
 # The blocks of `x`, in the order `crane_mpc/src/ocp.cpp` reduces to and expands
@@ -185,8 +194,40 @@ K_COMMAND_LAG_DOF = len(K_LAG_AXES)
 # them: the lagged command on the axes that have one, then the force state on
 # every planned axis.
 X_COMMAND_LAG = NX_RIGID
-X_ACTUATED_FORCE = NX_RIGID + K_COMMAND_LAG_DOF
-NX = NX_RIGID + K_COMMAND_LAG_DOF + K_PLANNED_DOF
+
+# --- the progress pair, `docs/features/mpc-full-authority/brief.md` 2.1 --------
+#
+# `s` is **virtual time**, in seconds of nominal plan, and `v_s` is how fast the
+# plan is being spent -- seconds of plan per second of wall clock, so `v_s = 1`
+# is exactly time-indexed tracking. This is the *time-scaling* form and not the
+# contouring one: the reference is a spline in `time_from_start`, so there is no
+# arclength anywhere and no contour error to decompose. `docs/features/
+# corridor-mpc/brief.md` 5.1 carries a progress variable that means spatial
+# progress with a linear reward and no tracking term; the two are not composable
+# and this is the other one.
+#
+# The rate is a state and its **acceleration** is the input, one order above
+# Marc's `s_dot`-as-input, so the plan's speed cannot step between cycles.
+#
+# They sit *before* the force state and not at the end of `x` on purpose:
+# `v_s >= 0` ("the machine does not run the plan backwards") is a box, the force
+# states deliberately carry none, and acados' `idxbx` is only readable as "the
+# state row" while the boxed rows are a contiguous prefix.
+X_PROGRESS = NX_RIGID + K_COMMAND_LAG_DOF
+X_PROGRESS_RATE = X_PROGRESS + 1
+K_PROGRESS_DOF = 2
+
+X_ACTUATED_FORCE = X_PROGRESS + K_PROGRESS_DOF
+NX = NX_RIGID + K_COMMAND_LAG_DOF + K_PROGRESS_DOF + K_PLANNED_DOF
+
+# The boxed rows of `x`: everything up to the force state, which is bounded by
+# `wiki/mpc.md` 3's constraint 6 instead of by a box.
+NBX = X_ACTUATED_FORCE
+
+# `u` with the progress acceleration on the end, which is what a consumer with
+# an actuator plans. `NU` above stays the joint-command block.
+U_PROGRESS_ACCEL = NU
+NU_PROGRESS = NU + 1
 
 # --- the parameter vector -----------------------------------------------------
 #
@@ -732,8 +773,11 @@ class CraneSymbolicModel:
         self.actuator = actuator
 
         # --- the symbols -----------------------------------------------------
+        # The progress pair rides with the actuator, because the C3 branch is the
+        # only consumer that has a `u` to spend time with; `actuator=None` is
+        # `crane_planning`'s timing OCP and its `x` and `u` are unchanged.
         self.x = ca.SX.sym("x", NX if actuator is not None else NX_RIGID)
-        self.u = ca.SX.sym("u", NU)
+        self.u = ca.SX.sym("u", NU_PROGRESS if actuator is not None else NU)
         self.p = ca.SX.sym("p", NP)
         self.q_tool = self.p[P_TOOL_POSITION]
         self.payload = self.p[P_PAYLOAD_MASS:NP]
@@ -787,6 +831,9 @@ class CraneSymbolicModel:
             # written in.
             self.tau_a = h_a + ca.mtimes(m_aa, self.ddq_a) + ca.mtimes(m_au, self.ddq_u)
             self.u_f = self.u
+            self.progress = None
+            self.progress_rate = None
+            self.progress_accel = None
             self.command_lag_rate = ca.SX.zeros(0)
             self.actuated_force_rate = ca.SX.zeros(0)
             self.actuated_force_static = ca.substitute(
@@ -875,12 +922,22 @@ class CraneSymbolicModel:
             )
             self.actuated_force_static = h_a[planned] + ca.mtimes(m_pu, ddq_u_static)
 
+            # The progress pair: `s` advances at `v_s` and `v_s` is driven by the
+            # sixth input. Nothing else in the plant reads either row -- the
+            # coupling to the machine is entirely through the cost, which is
+            # where the reference is evaluated at `s`.
+            self.progress = self.x[X_PROGRESS]
+            self.progress_rate = self.x[X_PROGRESS_RATE]
+            self.progress_accel = self.u[U_PROGRESS_ACCEL]
+
             self.xdot = ca.vertcat(
                 self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF],
                 self.x[X_PASSIVE_VELOCITY : X_PASSIVE_VELOCITY + K_PASSIVE_DOF],
                 ddq_p,
                 self.ddq_u,
                 self.command_lag_rate,
+                self.progress_rate,
+                self.progress_accel,
                 self.actuated_force_rate,
             )
 
