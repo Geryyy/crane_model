@@ -29,6 +29,11 @@
   <!-- The Python model reads the same URDF and hydraulics.yaml as the C++ one. -->
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <!-- test_description_snapshot.py re-expands the live xacro and refuses to
+       pass when it cannot: the fixture is a build input of `crane_mpc`'s
+       solver, so "could not check" must not read as "current". -->
+  <test_depend>epsilon_crane_description</test_depend>
+  <test_depend>xacro</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
 

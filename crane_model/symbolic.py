@@ -21,9 +21,9 @@ What it builds is the symbolic model used for code generation:
 * the mimic projection **P**, because Pinocchio drops `<mimic>` and
   `q5_small_telescope` and `q11_right_rail_joint` have to be reconstructed;
 * the damping of `wiki/robot_model.md` §1, read out of the description and then
-  overridden where `config/hydraulics.yaml` says to -- `q4_big_telescope`'s URDF
-  entry is a simulation number (`wiki/implementation/parameters.md` §5) and a
-  faithful URDF read is the *wrong* model here;
+  overridden where `config/hydraulics.yaml` says to -- the table is empty since
+  2026-09-07, because the description now carries the same C3 fit `k` comes
+  from and a faithful URDF read is the right model again;
 * the payload body at the mount frame, carried as a **symbol**: what it is bound
   to is the OCP's business (issue 072);
 * the cylinder transmission of `wiki/hydraulics.md` §2--§4, from the same
@@ -130,7 +130,9 @@ class ActuatorFit:
     axis and it lives in the node's predictor, not on the shooting grid
     (`docs/features/mpc-full-authority/brief.md` §2.2). Damping is not here
     either -- it reaches the dynamics through pinocchio's `model.damping` off
-    the description and stays there.
+    the description and stays there. It is the same C3 fit `k` below comes
+    from: `d_i` and `k_i` are one identification and only pair with each
+    other.
     """
 
     k: tuple[float, ...]

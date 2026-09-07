@@ -11,6 +11,18 @@ from launch_ros.substitutions import FindPackageShare
 
 DESCRIPTION_PACKAGE = "epsilon_crane_description"
 DESCRIPTION_FILE = "crane_description.urdf.xacro"
+TOOL = "pzs100_description"
+# The defaults of urdf/inc/parameters.xacro, spelled out. `sim_hydraulics:=true`
+# is what carries the cylinder attachment frames the linkage cross-check reads.
+# test/test_description_snapshot.py re-expands with these, so they live here
+# once rather than in both files.
+XACRO_ARGUMENTS = (
+    "gazebo:=false",
+    "sim_hydraulics:=true",
+    "rigid:=true",
+    "minimal:=false",
+    "rotator_joint_type:=continuous",
+)
 
 
 def _xacro_process(tool, output_name):
@@ -24,11 +36,7 @@ def _xacro_process(tool, output_name):
         cmd=[
             FindExecutable(name="xacro"),
             source,
-            "gazebo:=false",
-            "sim_hydraulics:=true",
-            "rigid:=true",
-            "minimal:=false",
-            "rotator_joint_type:=continuous",
+            *XACRO_ARGUMENTS,
             f"tool:={tool}",
             "-o",
             output,
@@ -55,6 +63,6 @@ def generate_launch_description():
                     "epsilon_crane_description/urdf/crane_description.urdf.xacro"
                 )
             ),
-            _xacro_process("pzs100_description", "pzs100.urdf"),
+            _xacro_process(TOOL, "pzs100.urdf"),
         ]
     )

@@ -20,13 +20,13 @@
     <disable_collisions link1="K0_mounting_base" link2="control_box_sensor_mount" reason="Never"/>
     <disable_collisions link1="K0_mounting_base" link2="hydraulic_block" reason="Never"/>
     <disable_collisions link1="K10_left_rail" link2="K12_right_rail" reason="Always"/>
-    <disable_collisions link1="K10_left_rail" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K10_left_rail" link2="K6_double_joint_link" reason="Default"/>
     <disable_collisions link1="K10_left_rail" link2="K7_rotator_upper_part" reason="Default"/>
-    <disable_collisions link1="K10_left_rail" link2="K8_rotator_lower_part" reason="Default"/>
+    <disable_collisions link1="K10_left_rail" link2="K8_rotator_lower_part" reason="Always"/>
     <disable_collisions link1="K10_left_rail" link2="K8_tool_center_point" reason="Adjacent"/>
-    <disable_collisions link1="K12_right_rail" link2="K6_double_joint_link" reason="Never"/>
+    <disable_collisions link1="K12_right_rail" link2="K6_double_joint_link" reason="Default"/>
     <disable_collisions link1="K12_right_rail" link2="K7_rotator_upper_part" reason="Default"/>
-    <disable_collisions link1="K12_right_rail" link2="K8_rotator_lower_part" reason="Default"/>
+    <disable_collisions link1="K12_right_rail" link2="K8_rotator_lower_part" reason="Always"/>
     <disable_collisions link1="K12_right_rail" link2="K8_tool_center_point" reason="Adjacent"/>
     <disable_collisions link1="K1_slewing_column" link2="K2_boom" reason="Adjacent"/>
     <disable_collisions link1="K1_slewing_column" link2="K4_outer_telescope" reason="Never"/>

@@ -142,13 +142,15 @@ recorded-trajectory parity campaign is for.
 - **`D`** is read from the selected description's `<dynamics damping>`, per
   `wiki/implementation/parameters.md` §1 and §5 — which is what keeps §5's
   hand-tuned passive damping out of this file. Two deliberate departures:
-  - **the telescope entry is zero**, and it is zero because
-    `config/hydraulics.yaml` says so. `damping_overrides` is a table of
-    `{joint, d, reason}`; `parse` applies whatever is on it and knows nothing
-    about which joint that is. The row's own reason is §5's: the URDF's `3.4e4`
-    is a simulation stability hack an order of magnitude above the identified
-    value and must not enter the model, and no identified value is recorded
-    anywhere in the vault, so the entry is zero rather than a guess.
+  - **the override table is empty** since 2026-09-07 (issue 127).
+    `damping_overrides` is a table of `{joint, d, reason}`; `parse` applies
+    whatever is on it and knows nothing about which joint that is. Its one row
+    forced the telescope to zero because the URDF's `3.4e4` was a simulation
+    stability hack and no identified value existed. The description has carried
+    the C3 fit's `5.640e4` since `epsilon_crane_description` `f28942e`, so the
+    row's reason is dead and the row went with it. The fit's own `±5 %` bracket
+    on that axis is 200 times wide, which is recorded rather than hidden: it is
+    the weakest of the five `d`, and it is still better than a zero.
   - **the mimicked joints' own damping is not added.** §5 tabulates damping per
     machine axis, and the mirrored rail's entry is the same simulation number
     duplicated for Gazebo; adding it would silently double the PZS100 tool axis.
@@ -495,11 +497,11 @@ disagreement in them cancels everywhere else:
   writes one function per mimic the description declares, *named after the joint*
   — so a description that lost one is a missing symbol at link time — and the
   test compares each against the `<mimic>` element it came from.
-* **the damping override reaches the Python model.** The telescope row must be
-  `0.0` and not the description's `3.4e4`, for the reason `parameters.md` §5
-  gives; every other row must be the description's own number. A faithful URDF
-  read is the *wrong* model here, and it is the one failure that leaves every
-  other quantity plausible.
+* **the damping override table reaches the Python model.** It is empty since
+  2026-09-07, so every row must now be the description's own number; the check
+  is that the table is applied at all, because an override that silently does
+  not reach the model is the one failure that leaves every other quantity
+  plausible.
 
 The spread of points covers configurations, velocities and payloads, and includes
 one per axis where a cylinder geometry is close to degenerate: `q2 = 2.38` is

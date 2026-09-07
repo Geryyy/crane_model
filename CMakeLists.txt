@@ -96,6 +96,12 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_python_parity test/test_python_parity.py)
   ament_add_pytest_test(test_python_collision test/test_python_collision.py)
+
+  # The fixture against the description it came from. `export_ocp.py --check`
+  # regenerates from the fixture, so only this catches the fixture itself going
+  # stale -- which is how the pre-fit damping stayed baked into the shipped
+  # solver.
+  ament_add_pytest_test(test_description_snapshot test/test_description_snapshot.py)
 endif()
 
 ament_package(CONFIG_EXTRAS "cmake/boost_python310_headers.cmake")

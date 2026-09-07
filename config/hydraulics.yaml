@@ -115,11 +115,11 @@ joints:
 # passive entries of §5 right without a table. A joint listed here overrides
 # that reading, with the reason it does; the model applies the table and knows
 # nothing about which joint is on it.
-damping_overrides:
-  - joint: q4_big_telescope
-    d: 0.0
-    reason: >-
-      parameters §5 calls this joint's URDF damping a simulation stability hack
-      an order of magnitude above the identified value and says it must not
-      enter the model. No identified value is recorded anywhere in the vault, so
-      the entry is zero rather than a guess.
+#
+# Empty since 2026-09-07. The telescope's entry forced d to 0.0 because no
+# identified value was recorded anywhere; the C3 fit
+# (wiki/diagrams/hydraulic_calibration/c3_full_model.json) gives 5.640e4 and
+# Marc's stack has an independent 5.94e4 (timber_crane_parameter
+# fricLinear[3]), 5 % apart. The description carries the fitted number, so
+# reading it is now the right answer.
+damping_overrides: []

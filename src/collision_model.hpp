@@ -189,13 +189,13 @@ inline constexpr std::array<LinkPair, kAllowedSelfPairCount> kAllowedSelfPairs{{
   {"K0_mounting_base", "control_box_sensor_mount"},  // Never
   {"K0_mounting_base", "hydraulic_block"},  // Never
   {"K10_left_rail", "K12_right_rail"},  // Always
-  {"K10_left_rail", "K6_double_joint_link"},  // Never
+  {"K10_left_rail", "K6_double_joint_link"},  // Default
   {"K10_left_rail", "K7_rotator_upper_part"},  // Default
-  {"K10_left_rail", "K8_rotator_lower_part"},  // Default
+  {"K10_left_rail", "K8_rotator_lower_part"},  // Always
   {"K10_left_rail", "K8_tool_center_point"},  // Adjacent
-  {"K12_right_rail", "K6_double_joint_link"},  // Never
+  {"K12_right_rail", "K6_double_joint_link"},  // Default
   {"K12_right_rail", "K7_rotator_upper_part"},  // Default
-  {"K12_right_rail", "K8_rotator_lower_part"},  // Default
+  {"K12_right_rail", "K8_rotator_lower_part"},  // Always
   {"K12_right_rail", "K8_tool_center_point"},  // Adjacent
   {"K1_slewing_column", "K2_boom"},  // Adjacent
   {"K1_slewing_column", "K4_outer_telescope"},  // Never
