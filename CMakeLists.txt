@@ -58,6 +58,14 @@ install(
 install(
   DIRECTORY launch
   DESTINATION share/${PROJECT_NAME})
+# The expanded description the OCP exporters bake their dynamics from. It is a
+# test fixture only in where it lives: `crane_mpc`'s node builds its problem
+# from this file at startup and cannot reach `test/` from an install.
+# `test/test_description_snapshot.py` is what keeps it honest against the live
+# xacro.
+install(
+  DIRECTORY test/description
+  DESTINATION share/${PROJECT_NAME})
 install(
   TARGETS ${PROJECT_NAME}
   EXPORT export_${PROJECT_NAME}
