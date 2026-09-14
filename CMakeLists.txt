@@ -18,6 +18,14 @@ find_package(yaml-cpp REQUIRED)
 # reads the same URDF and the same config/hydraulics.yaml as the C++ library.
 find_package(ament_cmake_python REQUIRED)
 
+# No live consumer outside this package, and stays anyway. Issue 132 deleted
+# `crane_mpc`'s C++ half, the last one; the other was `crane_control`, archived
+# under `src/_archive/` and still pinned by `cbs.repos`. Issue 135 grepped
+# `find_package`/`<depend>`/`#include` across everything that builds and confirmed
+# it -- do not re-derive. It stays because `test_recorded_parity` below links it,
+# the one statement in the workspace tying a chamber area or a damping number to
+# the 2026-08-19 recordings, and because an archived `crane_control` is meant to
+# come back and this is what makes that cheap.
 add_library(${PROJECT_NAME} src/model.cpp)
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
@@ -28,8 +36,8 @@ target_include_directories(${PROJECT_NAME}
 # Pinocchio and Coal are PRIVATE: contract §6 keeps them private implementation
 # details, so a consumer links the shared libraries but never sees the headers.
 # PIC because a consumer of this static archive may itself be a shared object --
-# pluginlib loads `crane_control`'s controller as one -- and Pinocchio's and
-# Coal's own libraries are shared.
+# pluginlib loaded `crane_control`'s controller as one, and would again -- and
+# Pinocchio's and Coal's own libraries are shared.
 set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(${PROJECT_NAME}
   PUBLIC Eigen3::Eigen
