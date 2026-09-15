@@ -576,8 +576,15 @@ def arm_ratio(constants: Constants, q3):
     ds_3/dq_3, `wiki/hydraulics.md` §2.3.
 
     A direct cylinder: the in-plane part rotates with q3 while the out-of-plane
-    offset stays constant. That offset keeps the stroke away from zero, so this
-    axis has no degenerate configuration.
+    offset stays constant.
+
+    That offset is **zero** in the shipped constants (`arm_ps4_y - arm_ps3_z`,
+    both 0.224) and `wiki/hydraulics.md` §2.3 says the linkage is planar as
+    built, so it does *not* keep the stroke away from zero as this docstring
+    used to claim. The ratio has a transmission dead point at q3 = 1.8466647,
+    where the pivot and both attachments are collinear, and is negative above
+    it. Finite throughout; see issue 126. What keeps that point off the solver
+    is `crane_mpc`'s control-safe box, not the geometry.
     """
     moving = _rotate(q3, (constants.arm_link_x(), constants.arm_link_y()))
     in_plane = _sub(moving, (constants.arm_ps3_x, constants.arm_ps3_y))

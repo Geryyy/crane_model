@@ -305,8 +305,15 @@ inline CylinderStroke boom_stroke(const hydraulics::Constants& constants, double
 }
 
 // wiki/hydraulics.md §2.3. A direct cylinder: the in-plane part rotates with
-// q3 while the out-of-plane offset stays constant. The lateral offset keeps the
-// stroke away from zero, so this axis has no degenerate configuration.
+// q3 while the out-of-plane offset stays constant.
+//
+// That offset is **zero** in the shipped constants (arm_ps4_y - arm_ps3_z, both
+// 0.224) and §2.3 says the linkage is planar as built, so it does not keep the
+// stroke away from zero as this comment used to claim. The ratio has a
+// transmission dead point at q3 = 1.8466647, where the pivot and both
+// attachments are collinear, and is negative above it. Finite throughout; see
+// issue 126. What keeps that point off the solver is crane_mpc's control-safe
+// box, not the geometry.
 inline CylinderStroke arm_stroke(const hydraulics::Constants& constants, double q3)
 {
   using std::sqrt;

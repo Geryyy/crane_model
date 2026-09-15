@@ -19,6 +19,9 @@
   <material name="grey">
     <color rgba="0.4 0.4 0.4 1.0"/>
   </material>
+  <material name="red">
+    <color rgba="1.0 0.0 0.0 1.0"/>
+  </material>
   <material name="lightgrey">
     <color rgba="0.8 0.8 0.8 1.0"/>
   </material>
@@ -33,6 +36,9 @@
   </material>
   <material name="white">
     <color rgba="1.0 1.0 1.0 1.0"/>
+  </material>
+  <material name="steel">
+    <color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/>
   </material>
   <!-- this is the standard coordinate system -->
   <link name="K0_mounting_base">
@@ -85,12 +91,18 @@
     </collision>
   </link>
   <!-- In order to make the suspension point visible without simulation of hydraulics -->
-  <joint name="K1_boom_cylinder_suspension_fix" type="fixed">
-    <origin rpy="0 0 0" xyz="0.433 -1.7682 0"/>
+  <joint name="boom_cylinder_linkage_big_mounting_on_slewing_column_fix" type="fixed">
+    <origin rpy="0 0 0" xyz="-0.120000 -0.070000 0"/>
     <parent link="K1_slewing_column"/>
-    <child link="K1_boom_cylinder_suspension"/>
+    <child link="K1_boom_cylinder_linkage_big_mounting_on_slewing_column"/>
   </joint>
-  <link name="K1_boom_cylinder_suspension"/>
+  <link name="K1_boom_cylinder_linkage_big_mounting_on_slewing_column"/>
+  <joint name="boom_cylinder_mounting_on_slewing_column_fix" type="fixed">
+    <origin rpy="0 0 0" xyz="0.433000 -1.774000 0"/>
+    <parent link="K1_slewing_column"/>
+    <child link="K1_boom_cylinder_mounting_on_slewing_column"/>
+  </joint>
+  <link name="K1_boom_cylinder_mounting_on_slewing_column"/>
   <link name="moved_with_q2"/>
   <joint name="dh_trans2" type="fixed">
     <origin rpy="0 0 0" xyz="3.49288333 0 0"/>
@@ -110,6 +122,7 @@
       <geometry>
         <mesh filename="package://epsilon_crane_description/meshes/boom.stl" scale="0.001 0.001 0.001"/>
       </geometry>
+      <material name="red"/>
     </visual>
     <collision>
       <origin rpy="0 0 -0.101235" xyz="-3.49288333 0 0"/>
@@ -119,12 +132,24 @@
     </collision>
   </link>
   <!-- In order to make the suspension point visible without simulation of hydraulics -->
-  <joint name="K2_arm_cylinder_suspension_fix" type="fixed">
-    <origin rpy="0 0 0" xyz="-1.6802 -0.0485 0"/>
+  <joint name="boom_cylinder_linkage_small_mounting_on_boom_fix" type="fixed">
+    <origin rpy="0 0 0" xyz="-3.039426 -0.036293 0"/>
     <parent link="K2_boom"/>
-    <child link="K2_arm_cylinder_suspension"/>
+    <child link="K2_boom_cylinder_linkage_small_mounting_on_boom"/>
   </joint>
-  <link name="K2_arm_cylinder_suspension"/>
+  <link name="K2_boom_cylinder_linkage_small_mounting_on_boom"/>
+  <joint name="arm_cylinder_right_suspension_fix" type="fixed">
+    <origin rpy="0 0 0" xyz="-1.6802 -0.0485 0.224"/>
+    <parent link="K2_boom"/>
+    <child link="K2_arm_cylinder_right_suspension"/>
+  </joint>
+  <link name="K2_arm_cylinder_right_suspension"/>
+  <joint name="arm_cylinder_left_suspension_fix" type="fixed">
+    <origin rpy="0 0 0" xyz="-1.6802 -0.0485 -0.224"/>
+    <parent link="K2_boom"/>
+    <child link="K2_arm_cylinder_left_suspension"/>
+  </joint>
+  <link name="K2_arm_cylinder_left_suspension"/>
   <link name="moved_with_q3"/>
   <joint name="dh_trans3" type="fixed">
     <origin rpy="1.5707963267948966 0 0" xyz="-0.3925 0 0"/>
@@ -142,6 +167,7 @@
       <geometry>
         <mesh filename="package://epsilon_crane_description/meshes/arm.stl" scale="0.001 0.001 0.001"/>
       </geometry>
+      <material name="red"/>
     </visual>
     <collision>
       <origin rpy="-1.5707963267948966 -1.5707963267948966 0" xyz="0.39250 0 0"/>
@@ -197,6 +223,19 @@
     <parent link="K3_arm"/>
     <child link="telescope_bended"/>
   </joint>
+  <!-- In order to make the suspension point visible without simulation of hydraulics -->
+  <joint name="arm_cylinder_piston_right_suspension_fix" type="fixed">
+    <origin rpy="0 0 0" xyz="0.274489018947000 0.224000000000000 0.468000481872000"/>
+    <parent link="K3_arm"/>
+    <child link="K3_arm_cylinder_piston_right_suspension"/>
+  </joint>
+  <link name="K3_arm_cylinder_piston_right_suspension"/>
+  <joint name="arm_cylinder_piston_left_suspension_fix" type="fixed">
+    <origin rpy="0 0 0" xyz="0.274489018947000 -0.224000000000000 0.468000481872000"/>
+    <parent link="K3_arm"/>
+    <child link="K3_arm_cylinder_piston_left_suspension"/>
+  </joint>
+  <link name="K3_arm_cylinder_piston_left_suspension"/>
   <link name="moved_with_q4"/>
   <joint name="dh_trans4" type="fixed">
     <origin rpy="0 0 0" xyz="0 0 3.157001602823000"/>
@@ -336,7 +375,7 @@
       <geometry>
         <mesh filename="package://epsilon_crane_description/meshes/control_box_sensor_mount.stl" scale="1 1 1"/>
       </geometry>
-      <material name="lightgrey"/>
+      <material name="steel"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 -0.04 0"/>
