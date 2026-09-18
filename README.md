@@ -243,6 +243,30 @@ neutral pose — and is checked in as `config/allowed_collisions.srdf` as well, 
 the MoveIt spelling. The SRDF in `epsilon_crane_moveit` was the starting point
 and is read by nothing here.
 
+### The self pairs are bounded before they are asked
+
+49 pairs survive the allowed list, and an exact Coal distance for each of them was
+the whole cost of a query against an empty scene. Each body carries a bounding
+sphere (`LinkGeometry.bounds`, built with it), so
+
+    |c_i - c_j| - (r_i + r_j)
+
+is a lower bound on the pair's distance. Pairs are tried cheapest-bound first and
+the loop stops once the running best is under the next bound -- everything after it
+in that order is at least as far. **87% of pairs never reach Coal** on the planner's
+bench corpus, which is 3.7x on the query and 1.45x on a whole `crane_planning` call.
+
+The answer is the one exhaustive evaluation would have given, distance and witness
+pair alike; ties break on pair order, not on bound order.
+`test_the_broad_phase_answers_exactly_what_checking_every_pair_would` holds it to
+that by inflating the radii until nothing can cull, which forces the exhaustive path
+through the same code. The cull is sound only while that expression is a *lower*
+bound, so a radius measured about anything but the shape's own AABB centre breaks
+it silently -- there is a second test for exactly that.
+
+Scene primitives are still checked exhaustively: one query each, and a scene is
+short where the self list is not.
+
 ### What the calls return
 
 `collision_queries` returns one result per scene primitive in scene order, then

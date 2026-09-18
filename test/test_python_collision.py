@@ -170,3 +170,45 @@ def test_a_restricted_query_splits_the_machine_at_the_upper_hinge():
     assert rigid[0].minimum_distance_m > swinging[0].minimum_distance_m + 0.5
     assert rigid[1].minimum_distance_m == whole[1].minimum_distance_m
     assert swinging[1].minimum_distance_m > rigid[1].minimum_distance_m + 0.5
+
+
+def test_the_broad_phase_answers_exactly_what_checking_every_pair_would():
+    """Self pairs are culled by a bounding-sphere lower bound -- 49 exact Coal
+    queries per configuration reduced to a handful. Inflating the radii makes every
+    bound useless and forces the exhaustive path through the same code, so the two
+    answers must agree on the distance *and* on which pair it came from."""
+    model = build(Tool.PZS100)
+    geometry = model._link_geometry()
+    exact = geometry.bound_radius.copy()
+
+    rng = np.random.default_rng(0)
+    lower = np.array([model._model.lowerPositionLimit[j] for j in range(8)])
+    upper = np.array([model._model.upperPositionLimit[j] for j in range(8)])
+    lower[~np.isfinite(lower)], upper[~np.isfinite(upper)] = -np.pi, np.pi
+
+    checked = 0
+    for _ in range(60):
+        q = rng.uniform(lower, upper)
+        culled = model.collision_queries(q, [])[-1]
+        geometry.bound_radius = np.full_like(exact, 1.0e6)  # nothing can cull
+        try:
+            exhaustive = model.collision_queries(q, [])[-1]
+        finally:
+            geometry.bound_radius = exact
+        assert culled.minimum_distance_m == exhaustive.minimum_distance_m
+        assert culled.other_id == exhaustive.other_id
+        checked += 1
+    assert checked == 60
+
+
+def test_the_broad_phase_bound_never_exceeds_the_distance_it_bounds():
+    """The cull is only sound while `|c_i - c_j| - (r_i + r_j)` is a *lower* bound;
+    a radius measured about the wrong origin would silently break that."""
+    model = build(Tool.PZS100)
+    geometry = model._link_geometry()
+    for (centre, radius), (_, _, shape, _) in zip(geometry.bounds, geometry.bodies):
+        shape.computeLocalAABB()
+        # Centre is the AABB's own centre, so both extreme corners sit at the
+        # half-diagonal and bound every other point of the shape.
+        for corner in (shape.aabb_local.min_, shape.aabb_local.max_):
+            assert radius >= float(np.linalg.norm(np.asarray(corner) - centre)) - 1e-9
