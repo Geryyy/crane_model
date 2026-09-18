@@ -1,11 +1,9 @@
 """
 Parse one URDF onto the canonical eight coordinates.
 
-The single owner of the canonical-to-description mapping. The description is
-read twice on purpose: Pinocchio builds the kinematic tree and drops `<mimic>`
--- with mimic parsing on it refuses the PZS100 outright, which declares the
-right rail as a mimic of a joint later in its own depth-first order -- so the
-coupled joints come from the XML itself rather than from a table here.
+Single owner of the canonical-to-description mapping. Read twice on purpose:
+Pinocchio drops `<mimic>` (parsing it on, Pinocchio refuses the PZS100, whose
+right rail mimics a later joint), so coupled joints come from the XML itself.
 """
 
 from __future__ import annotations
@@ -56,8 +54,8 @@ class Description:
         """
         Map canonical q[8] onto the description's own configuration vector.
 
-        Written off each joint's own nq, so a `continuous` rotator (nq == 2, a
-        cos/sin pair) and a revolute one (nq == 1) both work unchanged.
+        Off each joint's own nq: a `continuous` rotator (nq 2, cos/sin) and a
+        revolute one (nq 1) both work unchanged.
         """
         q_pin = self.neutral.copy()
         for index, drives in enumerate(self.drives):

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- The allowed-collision list of wiki/trajectory_planning.md 4.2.
+<!-- The allowed-collision list of the crane model.
 
      Derived once, by scripts/derive_collision_model.py, from:
        pzs100: test/description/pzs100.urdf

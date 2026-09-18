@@ -1,49 +1,32 @@
 # Recorded-trajectory parity fixture for `crane_model` (PRD user story 65).
 #
-# GENERATED, never hand-edited.  Regenerate with the workspace sourced and
-# the recordings mounted:
+# GENERATED, never hand-edited.  FROZEN: the command below ran once and went with
+# the test-surface strip of 104, so this is provenance, not a recipe.
 #
 #     python3 test/derive_recorded_parity.py \
 #         --description test/description/pzs100.urdf \
 #         --recordings /home/vscode/Documents/control_recordings \
 #         --output test/recorded_parity_fixture.txt
 #
-# Recordings: /home/vscode/Documents/control_recordings
-# Topic:      /joint_states  (sensor_msgs/msg/JointState, ~100 Hz)
-# Bags, by the index in column 0:
+# Topic /joint_states (sensor_msgs/msg/JointState, ~100 Hz) of four bags under
+# /home/vscode/Documents/control_recordings, by the index in column 0:
 #   0  2026-08-19_12-06-08-record
 #   1  2026-08-19_13-35-36-record
 #   2  2026-08-19_13-46-41-record
 #   3  2026-08-19_14-28-24-record
 #
-# `t_s` is seconds from the first message of that bag.  The eight `q` are
-# the canonical coordinates of model_api_contract.md section 2, read out of
-# /joint_states by their legacy URDF joint names; the recorded machine carries the
-# PZS100 rail gripper, so `q8` is `q9_left_rail_joint`.  The six actuated
-# coordinates are encoder measurements; the two passive ones, `theta6_tip_joint`
-# and `theta7_tilt_joint`, are what the retained stack's own estimator
-# published on the same topic -- they are recorded, not measured.  Both models
-# are evaluated at the identical `q`, so that distinction changes which
-# configurations the comparison visits and not what it compares.
+# 64 samples by farthest-point selection in range-normalised (q, dq) space over
+# every usable sample of every bag; `t_s` is seconds from that bag's first
+# message.  The eight canonical `q` come off /joint_states by legacy URDF joint
+# name (`q8` is `q9_left_rail_joint`; the machine carries the PZS100 rail
+# gripper).  Six are encoder measurements; the passive `theta6_tip_joint` and
+# `theta7_tilt_joint` are the retained stack's estimator output, not measured.
 #
-# The `mp_*` columns are the generated Maple/MATLAB model at revision 3b714eb,
-# evaluated on test/description/pzs100.urdf by test/mp_crane_reference.cpp with no
-# payload and gravity 9.81 m/s^2 -- read that file for which call produced
-# which column.  `mp_ddq_u_gain` is d(ddq_u)/d(ddq_a), 2 rows of 5 actuated
-# columns, row-major; `mp_ddq_u_bias` is ddq_u at ddq_a = 0 and the recorded
-# dq; `mp_ddq_u_bias_static` is the same at dq = 0, which leaves gravity
-# alone.  `mp_k8_rotation` is row-major.
-#
-# 64 samples, chosen by farthest-point selection in the range-normalised
-# (q, dq) space of every usable sample in every bag.  The range they span:
-#   theta1_slewing_joint     q [-0.0211, +0.6226]   |dq| <= 0.1893
-#   theta2_boom_joint        q [+0.5951, +0.8927]   |dq| <= 0.1065
-#   theta3_arm_joint         q [+0.3462, +0.5483]   |dq| <= 0.0890
-#   q4_big_telescope         q [+0.9648, +1.2492]   |dq| <= 0.0689
-#   theta6_tip_joint         q [+0.2690, +0.6266]   |dq| <= 0.4357
-#   theta7_tilt_joint        q [+1.4563, +1.6722]   |dq| <= 0.2235
-#   theta8_rotator_joint     q [-7.7998, -1.4596]   |dq| <= 0.8142
-#   q9_left_rail_joint       q [+0.1870, +0.5360]   |dq| <= 0.1516
+# `mp_*` is the generated Maple/MATLAB model at revision 3b714eb on
+# test/description/pzs100.urdf via test/mp_crane_reference.cpp, no payload,
+# gravity 9.81 m/s^2.  `mp_ddq_u_gain` is d(ddq_u)/d(ddq_a), 2 rows of 5 actuated
+# columns row-major; `mp_ddq_u_bias` is at ddq_a = 0 and the recorded dq,
+# `mp_ddq_u_bias_static` at dq = 0.  `mp_k8_rotation` is row-major.
 #
 # Columns:
 #    0.. 0  bag

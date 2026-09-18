@@ -1,13 +1,9 @@
 """
 Collision geometry and distance queries, on Coal.
 
-The fitted link primitives and the self pairs not worth checking are read from
-config/collision_model.yaml. The C++ library compiles the same table in because
-it is ROS-free and cannot resolve a `package://` mesh URI; Python has no such
-constraint and reads the file.
-
-Every *placement* still comes from the description at runtime: each primitive is
-attached to the link frame Pinocchio parsed.
+Fitted link primitives and the self pairs not worth checking come from
+config/collision_model.yaml; the C++ library compiles the same table in, having
+no `package://` resolver. Placements come from the parsed description at runtime.
 """
 
 from __future__ import annotations
@@ -29,9 +25,8 @@ class CollisionPrimitive:
     """
     One convex body in K0_mounting_base.
 
-    `dimensions_m` is the extent along each axis of the primitive's own frame --
-    not a half extent and not a radius. A box carries its three side lengths, a
-    cylinder (2r, 2r, length), and a sphere its diameter three times.
+    `dimensions_m` is the full extent per axis of the primitive's own frame, not
+    a half extent or radius: box sides, cylinder (2r, 2r, length), sphere 3x 2r.
     """
 
     id: str
@@ -39,13 +34,10 @@ class CollisionPrimitive:
     pose_in_mounting_base: pin.SE3 = field(default_factory=pin.SE3.Identity)
     dimensions_m: np.ndarray = field(default_factory=lambda: np.zeros(3))
     structural: bool = False
-    #: This body is held by the tool. It is then **not** checked against the
-    #: links that hold it -- they are gripping it, and reporting that as a
-    #: collision refuses every pose -- and it **is** checked against the rest of
-    #: the scene, which a scene body otherwise never is. A caller that carries
-    #: something has to place it: the pose is read at the configuration being
-    #: checked, so it travels with the tool rather than standing where the
-    #: machine set off from.
+    #: Held by the tool: **not** checked against the links gripping it (that
+    #: would refuse every pose) and **is** checked against the rest of the scene,
+    #: which a scene body otherwise never is. The pose is read at the checked
+    #: configuration, so it travels with the tool.
     attached_to_tool: bool = False
 
 
@@ -79,8 +71,7 @@ def _scene_geometry(primitive: CollisionPrimitive):
         )
     if primitive.shape == "box":
         return coal.Box(*extents)
-    # A cylinder or sphere whose extents disagree is refused rather than
-    # silently reinterpreted, so a caller who passed a radius is told.
+    # Disagreeing extents are refused, not reinterpreted: a radius gets told.
     if primitive.shape == "cylinder":
         if not np.isclose(extents[0], extents[1]):
             raise CraneModelError(
@@ -163,10 +154,8 @@ class LinkGeometry:
                 (entry["link"], model.getFrameId(entry["link"]), geometry, placement)
             )
 
-        # Which of those bodies are the hand rather than the arm. A payload is
-        # excluded from exactly these, and the set is derived from the
-        # description rather than named here: a body is carrying if the joint
-        # that places it is at or below the joint a payload mounts on.
+        # Which bodies are the hand rather than the arm; a payload is excluded from
+        # exactly these. Carrying == placed at or below the payload mount joint.
         mount = None
         if model.existFrame(Frame.ROTATOR_LOWER_PART.value):
             mount = model.frames[
@@ -179,10 +168,8 @@ class LinkGeometry:
             or mount not in list(model.supports[model.frames[frame].parentJoint])
         ]
 
-        # Which bodies swing. The tool hangs on two passive hinges, the upper one
-        # placing the double-joint link, so a body swings when the joint that
-        # places it is at or below that hinge. What the sway envelope must be
-        # charged to, and nothing else.
+        # Which bodies swing: placed at or below the tool's upper passive hinge.
+        # What the sway envelope is charged to, and nothing else.
         hinge = None
         if model.existFrame(Frame.TILT.value):
             hinge = model.frames[model.getFrameId(Frame.TILT.value)].parentJoint
@@ -225,27 +212,18 @@ def queries(
     """
     Check the scene and the machine against itself.
 
-    One result per scene primitive, in scene order, then one for the machine
-    against itself. Each is the closest pair found against that object.
-
-    `swinging` restricts the machine to the bodies below the tool's upper
-    passive hinge (True) or to everything above it (False). A restricted query
-    answers the scene rows only -- self-collision is a property of the whole
-    machine and is not split.
-
-    A primitive marked `attached_to_tool` is answered differently, and the two
-    halves go together. It is not checked against the links that hold it, which
-    would report the grip itself as a collision and refuse every pose. And it
-    *is* checked against the other scene primitives, which an ordinary scene
-    body never is -- because what a carried body is for is hitting the world,
-    and a payload checked only against the machine that carries it is a payload
-    that has not been checked at all.
+    One per scene primitive, in scene order, then one for the machine against
+    itself; each is the closest pair against that object. `swinging` restricts
+    the machine to bodies below the tool's upper passive hinge (True) or above
+    it (False); such a query answers the scene rows only -- self-collision is
+    not split. An `attached_to_tool` primitive is not checked against the links
+    holding it (the grip would refuse every pose) and *is* checked against the
+    other scene primitives, which an ordinary scene body never is.
     """
     validate_scene(scene)
     pin.forwardKinematics(model, data, configuration)
-    # Only the base and the frames that carry a body, as `Model::place_bodies`
-    # in src/model.cpp does: the machine has far more frames than fitted
-    # primitives, and every one of them is refreshed on every query otherwise.
+    # Only the base and the frames carrying a body, as `Model::place_bodies` in
+    # src/model.cpp: far more frames than primitives, refreshed per query otherwise.
     base_frame = model.getFrameId(Frame.MOUNTING_BASE.value)
     pin.updateFramePlacement(model, data, base_frame)
     for _, frame, _, _ in geometry.bodies:
@@ -311,7 +289,7 @@ def queries(
 
 
 def query(model, data, geometry: LinkGeometry, configuration, scene) -> CollisionResult:
-    """Reduce the whole scene and the machine itself to the one pair that matters."""
+    """Reduce the whole scene and the machine itself to the one closest pair."""
     return min(
         queries(model, data, geometry, configuration, scene),
         key=lambda result: result.minimum_distance_m,

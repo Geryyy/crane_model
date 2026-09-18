@@ -1,0 +1,69 @@
+# The low-level velocity loop: the law the JTC runs on the machine, and its gains.
+#
+# Authoritative copy. The deployed controller cannot import python, so
+# `concrete_block_behavior_tree/config/ros2_control/
+# crane_controller_hydraulic_a2b_jtc_pid_pzs100.ros2_control.yaml` carries the
+# same numbers under `trajectory_controller_a2b.ros__parameters.gains`, and
+# `test_velocity_loop.py::test_mirrors_ros2_control` asserts the two agree field
+# by field. Change this file and that one together or the test fails.
+#
+# Provenance of the gains: wiki/controller_design.md 4.1, one fixed pair per axis,
+# margins held over the whole M_ii range and the worst-case lag/dead-time split.
+# u_clamp_* is Psi's identified domain (min_x/max_x of the compensator fit), which
+# is also what crane_planning reads as command_u_min/command_u_max.
+#
+# NAMING TRAP, do not "fix": `p`/`i`/`d` are a velocity PI, not a position PID.
+# On a velocity command interface int(e_qdot) dt == e_pos, so matching
+# K_P e_qdot + K_I int(e_qdot) term by term gives p == K_I and d == K_P.
+# `i` must stay 0 -- it would integrate the position error a second time.
+
+# Hz. The ros2_control update rate the gains were designed at.
+rate_hz: 100.0
+
+# One entry per actuated joint, canonical order (config/hydraulics.yaml `joints`,
+# actuated rows). Fields absent here take the plugin schema's defaults:
+# i 0, d 0, u_clamp_min -inf, u_clamp_max +inf.
+gains:
+  theta1_slewing_joint:
+    # A trim integrator, not a velocity loop -- dominant time constant 28 s.
+    # Psi fixes the DC gain so the feedforward alone has no steady-state error,
+    # and the axis is owned dynamically by the 25 Hz level. Do not hand-tune up.
+    ff_velocity_scale: 1.0
+    p: 0.07
+    i: 0.0
+    d: 0.0038
+    u_clamp_min: -0.9635
+    u_clamp_max: 0.9357
+  theta2_boom_joint:
+    ff_velocity_scale: 1.0
+    p: 1.30
+    i: 0.0
+    d: 0.0945
+    u_clamp_min: -0.3134
+    u_clamp_max: 0.2977
+  theta3_arm_joint:
+    ff_velocity_scale: 1.0
+    p: 1.00
+    i: 0.0
+    d: 0.1131
+    u_clamp_min: -0.3342
+    u_clamp_max: 0.3059
+  q4_big_telescope:
+    ff_velocity_scale: 1.0
+    p: 5.14
+    i: 0.0
+    d: 0.3302
+    u_clamp_min: -0.5551
+    u_clamp_max: 0.5849
+  theta8_rotator_joint:
+    ff_velocity_scale: 1.0
+    p: 2.35
+    i: 0.0
+    d: 0.1176
+    u_clamp_min: -2.3969
+    u_clamp_max: 2.4636
+  q9_left_rail_joint:
+    # Tool: deliberately not tuned, no campaign covers this axis, Psi forwards it
+    # unchanged. No clamp -- the deployed yaml sets none either.
+    ff_velocity_scale: 1.0
+    p: 1.0

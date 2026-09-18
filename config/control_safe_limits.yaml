@@ -1,0 +1,133 @@
+# The control-safe joint box: narrower than the description, and where each
+# number came from (issues 126, 128, ported onto this lineage by 141).
+# **Read by `crane_mpc` and `crane_planning`, by nothing in this package** --
+# constraint 1's box and constraint 2's bound, and the rows the planner
+# intersects its description-read limits with, so it stops certifying poses and
+# speeds the MPC hard-refuses. Before 128 both read the URDF's limits, which on
+# the boom admit 0.0158 rad the four-bar cannot reach.
+# Rows keyed by axis name, never by index: the two packages order their
+# coordinates differently and only the name is stable. Actuated order is q1
+# slewing, q2 boom, q3 arm, q4 telescope, q7 rotator, q8 tool; angles in rad
+# and rad/s, telescope and tool in m and m/s.
+
+sources:
+  marc_hpp: "timber_crane_model_cpp/include/timber_crane_model_cpp/joint_limits.hpp:14-30
+    -- what his MPC's joint-limit constraint reads"
+  marc_yaml: "epsilon_crane_bringup_mp/config/motion_planning/mp_parameter_pzs100.yaml:135-224
+    -- deployed; `qMinCtrl`/`qMaxCtrl`/`qDotMinCtrl`/`qDotMaxCtrl`, whose naming *is*
+    the control-safe-versus-description distinction"
+  urdf: "epsilon_crane_description/urdf/joints/theta*.urdf.xacro -- the description"
+  stroke: "the vendor stroke table, plus the transmissions that turn a stroke into
+    a joint angle"
+  psi: "Psi's identified domain"
+
+# `marc_hpp` and `marc_yaml` agree to the digit on every crane row -- measured,
+# not inferred. His PZS100 and timber configs differ only in the tool joint.
+q_a_lower:
+  slewing:
+    value: -3.71
+    source: [marc_hpp, marc_yaml, urdf]
+    check: "rack and pinion, one-to-one; no stroke limit is tabulated, so travel
+      is the only bound and the description already carries it"
+  boom:
+    value: 0.0
+    source: [marc_hpp, marc_yaml]
+    check: "**changed by 128**, was the urdf's -1.2. The four-bar stops closing at
+      q2 = -1.1841609 (delta < 0 below it) and the ratio is negative on
+      (-1.18416, -1.15096), reaching -6.1. s2 >= 1.253 m gives q2 >= -1.054, so the
+      stroke limit alone excluded all of it. 0.0 sits 1.18 rad clear; s2(0) = 1.609 m"
+  arm:
+    value: -0.91
+    source: [marc_hpp, marc_yaml]
+    check: "s3(-0.91) = 1.2468 m against s_min = 1.244 m -- stroke-feasible by
+      2.8 mm, the tightest margin in this file. The stroke limit itself implies
+      q3 >= -0.9217"
+  telescope:
+    value: 0.0
+    source: [marc_hpp, marc_yaml, urdf]
+    check: "s4 = q4; fully retracted is the stroke bound. The machine parks here,
+      which is why q_a_margin may never exclude the measured pose"
+  rotator:
+    value: -12.566370614359172
+    source: [marc_hpp, marc_yaml]
+    check: "-4pi. A motor, no piston and no stroke; the bound is turn counting,
+      not geometry. Already Marc's and never the urdf's"
+  tool:
+    value: 0.2
+    source: []
+    check: "unresolved. His tool row is an angle on a [0, 3] joint -- a retired jaw
+      gripper -- and does not compare. The PZS100 rail travels 0.0..0.538 m"
+
+q_a_upper:
+  slewing: {value: 3.71, source: [marc_hpp, marc_yaml, urdf], check: "see q_a_lower"}
+  boom:
+    value: 1.563
+    source: [urdf]
+    check: "the description's, 0.001 rad above Marc's 1.562 and left alone: 128's
+      direction is inward and this is not the end that was wrong. s2(1.563) =
+      2.2113 m against s_max = 2.229 m, so it is stroke-feasible either way"
+  arm:
+    value: 1.324864
+    source: [marc_hpp, marc_yaml]
+    check: "issue 126. 0.52 rad below the transmission dead point at q3 = 1.8466647,
+      where constraint 6's extend and retract bounds would swap. s3 = 2.1131 m,
+      inside s_max = 2.172 m. Was the urdf's 4.6"
+  telescope: {value: 2.236, source: [marc_hpp, marc_yaml, urdf], check: "see q_a_lower"}
+  rotator: {value: 12.566370614359172, source: [marc_hpp, marc_yaml], check: "+4pi"}
+  tool:
+    value: 0.7
+    source: []
+    check: "**above the rail's 0.538 m travel** and unresolved with the lower: which
+      coordinate row 5 carries is not settled, so 128 did not narrow a number it
+      cannot attribute. Worth an issue"
+
+# Constraint 2 is one magnitude per axis and his box is asymmetric; each row
+# takes the smaller of his two, so the narrowing is inward on both sides.
+dq_a_max:
+  slewing: {value: 0.764, source: [marc_yaml], check: "his -0.764 / +0.802; was 0.802"}
+  boom: {value: 0.239067, source: [marc_yaml], check: "his -0.325963 / +0.239067; was 0.326"}
+  arm: {value: 0.325733, source: [marc_yaml], check: "his -0.343547 / +0.325733; was 0.344"}
+  telescope: {value: 0.400000, source: [marc_yaml], check: "his -0.630189 / +0.400000; was 0.630"}
+  rotator: {value: 2.121947, source: [marc_yaml], check: "symmetric there already"}
+  tool: {value: 0.5, source: [], check: "hand-set; no counterpart, his tool is PID'd
+    outside the MPC"}
+
+# Marc's `joint_limit.safety_thresh`, as a tightening of the position rows and
+# not the point a penalty starts biting: dq_a_max times the 60 ms transport dead
+# time, the travel an axis cannot react within. The box both packages enforce is
+# q_a_lower + q_a_margin .. q_a_upper - q_a_margin.
+# Kept at the **pre-128** dq_a_max and deliberately not recomputed: on the four
+# axes 128 narrowed the product is now smaller, and a smaller margin widens the
+# effective box, which 128 forbids.
+q_a_margin:
+  slewing: {value: 0.048, source: [marc_yaml], check: "0.802 x 0.06, pre-128 dq"}
+  boom: {value: 0.020, source: [marc_yaml], check: "0.326 x 0.06, pre-128 dq"}
+  arm: {value: 0.021, source: [marc_yaml], check: "0.344 x 0.06, pre-128 dq"}
+  telescope: {value: 0.038, source: [marc_yaml], check: "0.630 x 0.06, pre-128 dq"}
+  rotator: {value: 0.127, source: [marc_yaml], check: "2.122 x 0.06, rounded"}
+  tool:
+    value: 0.030
+    source: []
+    check: "hand-set with the tool rows above, and carried for shape only --
+      crane_planning does not apply it, see the tool note under known_gaps"
+
+# The one derived row, recorded so the derivation does not get lost.
+derived:
+  u_max: "min(psi domain, dq_a_max) per axis. After 128 only the arm is bound by
+    the domain (0.3059 against 0.325733); the other four are bound by dq_a_max"
+
+known_gaps:
+  tool_row: "**the tool rows above do not describe this tool.** Marc's row 5 is an
+    angle on a [0, 3] joint -- a retired jaw gripper -- while the PZS100 carries a
+    rail travelling 0.0..0.538 m, so 0.2 and 0.7 are wrong in both directions and
+    128 declined to narrow a number it could not attribute. crane_planning
+    therefore does **not** intersect its tool range with this row and keeps the
+    description's; crane_mpc still enforces it, so a tool pose below 0.23 m is
+    still a reference constraint 1 refuses. Correcting the MPC's row widens its
+    box and is its own change"
+  engagement_band: "there is no `position_box` equivalent on the velocity rows.
+    Between the two sides of Marc's asymmetric box -- boom 0.239..0.326 rad/s
+    lowering, telescope 0.400..0.630 m/s retracting -- the machine may legally be
+    moving faster than the MPC's own stage-1 bound, so engaging there asks the
+    first interval to brake. Taking the looser side instead is what this change
+    refuses; the alternative is a two-sided constraint 2"

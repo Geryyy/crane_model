@@ -1,102 +1,100 @@
-# The constants crane_model needs and the robot description does not carry.
+# Constants crane_model needs and the robot description does not carry.
 #
-# Two things read this file, and neither may hold a second copy of a number in
-# it: the C++ `crane_model` reads it in `Model::create` (`src/model.cpp`), and
-# the Python export builds the same dynamics with `pinocchio.casadi` out of the
-# same keys. A constant compiled into one side and typed into the other is
-# exactly the drift this file exists to make impossible, so nothing below
-# appears as a literal in any `.hpp` or `.cpp` of this package -- including the
-# ones the numeric API still needs, because `cylinder_jacobian`, `transmission`
-# and `cylinder_force` are public (model API contract §4). This is sharing, not
-# relocation.
-#
-# Units are SI throughout (`wiki/implementation/style_guide.md` §2). Symbols are
-# the `Code` column of `wiki/nomenclature.md` §7 and §10.
-#
-# A missing or malformed entry is a `Status` failure out of `Model::create`, not
-# a default: a wrong hydraulic constant is a wrong force limit.
+# Read by the Python `CraneModel` constructor (`crane_model/model.py`) and by
+# `crane_mpc` and `crane_planning`. Units SI.
+# Missing or malformed entry raises `CraneModelError`, never a default: a wrong
+# hydraulic constant is a wrong force limit.
 
 # --- the two constant transmissions ------------------------------------------
-r_gear: 0.1        # §6.1, slewing rack-and-pinion radius, m
-V_m: 1.4324e-4     # §6.1, rotator motor volumetric displacement, m^3/rad
+r_gear: 0.1        # slewing rack-and-pinion radius, m
+V_m: 1.4324e-4     # rotator motor volumetric displacement, m^3/rad
 
-# --- chamber areas, §6.1 ------------------------------------------------------
-#
-# The force-producing areas of §4, one entry per hydraulic axis. What each axis
-# does with them -- two cylinders on slewing and on the arm, the regenerative
-# extension of the telescope, V_m in all four slots of the rotator -- is the
-# circuit topology of §2 and §3 and stays in code; only the numbers are here.
-#
-# Slewing carries no A_B because §6.1 states none: its circuit is symmetric and
-# both chambers see the same 2 A_A.
+# --- chamber areas ------------------------------------------------------------
+# One entry per hydraulic axis; circuit topology stays in code, only numbers
+# here. Slewing carries no A_B deliberately: symmetric circuit, both chambers
+# see the same 2 A_A.
 areas:
   q1_slewing:
-    A_A: 6.362e-3     # §6.1, m^2
+    A_A: 6.362e-3     # m^2
   q2_boom:
-    A_A: 1.5394e-2    # §6.1, m^2
-    A_B: 9.032e-3     # §6.1, m^2
+    A_A: 1.5394e-2    # m^2
+    A_B: 9.032e-3     # m^2
   q3_arm:
-    A_A: 6.362e-3     # §6.1, m^2
-    A_B: 2.5133e-3    # §6.1, m^2
+    A_A: 6.362e-3     # m^2
+    A_B: 2.5133e-3    # m^2
   q4_telescope:
-    A_A: 3.8485e-3    # §6.1, m^2
-    A_B: 2.592e-3     # §6.1, m^2
+    A_A: 3.8485e-3    # m^2
+    A_B: 2.592e-3     # m^2
   q8_tool:
-    A_A: 7.854e-3     # §6.1, m^2
-    A_B: 4.737e-3     # §6.1, m^2
+    A_A: 7.854e-3     # m^2
+    A_B: 4.737e-3     # m^2
 
-# --- boom four-bar, §2.2 with the values of §6.2 ------------------------------
-#
-# Every length here except the two bar lengths is also a placement in the real
-# description, and `CraneModelDescription.LinkagePlacementsAgreeWithTheCompiled
-# Constants` asserts that the two agree; a_2 is split from pS2.x so each side of
-# that sum can be checked against the frame that carries it.
+# --- the pump -----------------------------------------------------------------
+# Not read by the model itself: `crane_mpc` and `crane_planning` both need it,
+# and both import it from here (`crane_model.hydraulic_limits()`). Each still
+# declares its own ROS parameter so a deployment can override; neither repeats
+# the number.
+# Q_P^max is *measured 2023, pre-retrofit, never re-verified* -- machine since
+# rebuilt, and the control_recordings/ bags carry no flow measurement to close
+# it. `planning_factor` is the planning discount and **not** a second kappa:
+# kappa is separate and larger, and the two multiply.
+pump:
+  flow_max: 1.4e-3       # Q_P^max, m^3/s
+  planning_factor: 0.95  # the planning discount, dimensionless
+
+# --- relief setting -----------------------------------------------------------
+# Also not read here: `crane_mpc`'s constraint 6 derives F_i^max from it
+# (effective piston area x relief pressure, torque through the transmission).
+# The areas above are recorded, no relief setting is, so this is the one number
+# constraint 6 cannot derive: 2.5e7 (250 bar) is a **plausible setting for a
+# crane of this class, not a reading off this one**. crane_planning enforces no
+# force constraint at all and ignores it.
+system_pressure_pa: 2.5e7   # Pa
+
+# --- boom four-bar ------------------------------------------------------------
+# Every length but the two bar lengths is also a placement in the description;
+# a2 is split from pS2.x so each side of that sum checks against its own frame.
+# Nothing asserts the two agree -- check by hand after a description change.
 boom:
   pS0:
-    x: 0.433          # §6.2, cylinder foot on the column, m
-    y: -1.7682        # §6.2, m
+    x: 0.433          # cylinder foot on the column, m
+    y: -1.7682        # m
   pS1:
-    x: -0.12          # §6.2, four-bar pivot on the column, m
-    y: -0.07          # §6.2, m
-  a2: 3.49288         # §6.2, theta2 joint to K2_boom, m
+    x: -0.12          # four-bar pivot on the column, m
+    y: -0.07          # m
+  a2: 3.49288         # theta2 joint to K2_boom, m
   pS2:
-    x: -3.039         # §6.2, four-bar attachment in K2_boom, m
-    y: -0.036034      # §6.2, m
-  # The description closes this loop only in Gazebo, so neither bar length is a
-  # placement Pinocchio can read back out of it.
-  r13: 0.57           # §6.2, Zugstange, m
-  r23: 0.124          # §6.2, Druckstange, m
+    x: -3.039         # four-bar attachment in K2_boom, m
+    y: -0.036034      # m
+  # Loop closed only in Gazebo, so Pinocchio cannot read either bar length back
+  # out of the description as a placement.
+  r13: 0.57           # Zugstange, m
+  r23: 0.124          # Druckstange, m
 
-# --- arm cylinder, §2.3 with the values of §6.2 -------------------------------
-#
-# The lateral term is pS4.y - pS3.z and not pS4.z - pS3.z, because the two
-# attachment points live in links with different CAD-to-model rotations; see the
-# callout in §2.3 before "normalising" it.
+# --- arm cylinder -------------------------------------------------------------
+# Lateral term is pS4.y - pS3.z, not pS4.z - pS3.z: the two attachment points
+# live in links with different CAD-to-model rotations. Deliberate, not a typo.
 arm:
   pS3:
-    x: -1.6802        # §6.2, cylinder foot on the boom, m
-    y: -0.0485        # §6.2, m
-    z: 0.224          # §6.2, m
-  a3: -0.3925         # §6.2, theta3 joint to K3_arm, m
+    x: -1.6802        # cylinder foot on the boom, m
+    y: -0.0485        # m
+    z: 0.224          # m
+  a3: -0.3925         # theta3 joint to K3_arm, m
   pS4:
-    x: 0.274489       # §6.2, cylinder attachment on the arm, m
-    y: 0.224          # §6.2, m
-    z: 0.468          # §6.2, m; the model rotates -pS4.z
+    x: 0.274489       # cylinder attachment on the arm, m
+    y: 0.224          # m
+    z: 0.468          # m; the model rotates -pS4.z
 
-# --- smoothing of constraint 7, wiki/mpc.md §3.1 ------------------------------
-#
-# Applied to the *model* and never to the inner loop's dead-zone compensator.
-# They are kept here so the Python export and the numeric model read the same
-# values rather than carrying another set of code-generation constants.
-# Both are far below the resolution any axis is commanded at, so the smoothed Q
-# agrees with `Model::transmission`'s to well under a part in 10^6 once |v| is a
-# millimetre per second or more.
+# --- smoothing of constraint 7 ------------------------------------------------
+# Applied to the *model*, never to the inner loop's dead-zone compensator; here
+# so the Python export and the numeric model read one set. Both far below any
+# commanded resolution -- the smoothed Q matches `Model::transmission`'s to
+# under a part in 10^6 once |v| >= 1 mm/s.
 smoothing:
-  eps_abs: 1.0e-6     # mpc §3.1, |v| ~= sqrt(v^2 + eps^2), m/s
-  eps_v: 1.0e-3       # mpc §3.1, the A^{+-} switch scale, m/s
+  eps_abs: 1.0e-6     # |v| ~= sqrt(v^2 + eps^2), m/s
+  eps_v: 1.0e-3       # the A^{+-} switch scale, m/s
 
-# --- the canonical joint-name map, model API contract §2 ----------------------
-#
+# --- the canonical joint-name map ---------------------------------------------
 # The canonical eight coordinates as the URDF spells them, in contract order.
 joints:
   - theta1_slewing_joint
@@ -109,17 +107,11 @@ joints:
   - q9_left_rail_joint
 
 # --- per-joint damping overrides ----------------------------------------------
-#
-# D of `wiki/robot_model.md` §1 is read out of the selected description
-# (`wiki/implementation/parameters.md` §1), which is what gets the per-tool
-# passive entries of §5 right without a table. A joint listed here overrides
-# that reading, with the reason it does; the model applies the table and knows
-# nothing about which joint is on it.
-#
-# Empty since 2026-09-07. The telescope's entry forced d to 0.0 because no
-# identified value was recorded anywhere; the C3 fit
-# (wiki/diagrams/hydraulic_calibration/c3_full_model.json) gives 5.640e4 and
-# Marc's stack has an independent 5.94e4 (timber_crane_parameter
-# fricLinear[3]), 5 % apart. The description carries the fitted number, so
-# reading it is now the right answer.
+# D is read out of the selected description, which is what gets the per-tool
+# passive entries right without a table. A joint listed here overrides that
+# reading, with the reason it does; the model just applies the table.
+# Empty since 2026-09-07: the telescope entry forced d = 0.0 for want of any
+# identified value, but the C3 fit gives 5.640e4 and Marc's stack an
+# independent 5.94e4 (timber_crane_parameter fricLinear[3]), 5 % apart, and the
+# description now carries the fitted number. Reading it is the right answer.
 damping_overrides: []

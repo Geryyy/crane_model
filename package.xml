@@ -2,42 +2,34 @@
 <package format="3">
   <name>crane_model</name>
   <version>0.1.0</version>
-  <description>ROS-free frozen crane model API.</description>
+  <description>Python crane model API: symbolic and numeric boundaries for planning and control.</description>
   <maintainer email="maintainers@example.invalid">Architecture maintainers</maintainer>
   <license>Apache-2.0</license>
 
-  <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>ament_cmake_python</buildtool_depend>
-  <build_depend>eigen</build_depend>
-  <exec_depend>eigen</exec_depend>
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- config/hydraulics.yaml, config/collision_model.yaml are read by the Python model. -->
+  <!-- The Python model uses Pinocchio and Coal via their Python bindings. -->
   <depend>pinocchio</depend>
   <depend>coal</depend>
-  <!-- config/hydraulics.yaml, read in Model::create. Listed for "configuration
-       outside the parameter system" in wiki/implementation/libraries.md; it is
-       a parser, not ROS, so the package stays ROS-free. -->
-  <depend>yaml-cpp</depend>
-  <!-- The library remains ROS-free; these are only for the URDF update launch. -->
+  <depend>casadi</depend>
+  <depend>python3-numpy</depend>
+  <depend>python3-yaml</depend>
+
+  <!-- Launch files -->
   <exec_depend>epsilon_crane_description</exec_depend>
   <exec_depend>pzs100_description</exec_depend>
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>xacro</exec_depend>
-  <!-- `crane_model/symbolic.py` builds the equations of motion as a CasADi
-       graph over Pinocchio's own CasADi bindings. It is part of the installed
-       package and not a script, because `crane_planning` assembles its optimal
-       control problem from it at runtime. -->
-  <depend>casadi</depend>
-  <!-- The Python model reads the same URDF and hydraulics.yaml as the C++ one. -->
-  <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>python3-yaml</exec_depend>
-  <!-- test_description_snapshot.py re-expands the live xacro and refuses to
-       pass when it cannot: the fixture is a build input of `crane_mpc`'s
-       solver, so "could not check" must not read as "current". -->
+
+  <!-- For the collision model derivation script -->
+  <exec_depend>python3-matplotlib</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
   <test_depend>epsilon_crane_description</test_depend>
   <test_depend>xacro</test_depend>
-  <test_depend>ament_cmake_gtest</test_depend>
-  <test_depend>ament_cmake_pytest</test_depend>
 
   <export>
-    <build_type>ament_cmake</build_type>
+    <build_type>ament_python</build_type>
   </export>
 </package>

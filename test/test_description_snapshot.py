@@ -1,12 +1,9 @@
 """The checked-in URDF fixture against the description it was expanded from.
 
-`crane_mpc`'s `export_ocp.py --check` regenerates the solver from this
-snapshot, so it cannot see the snapshot itself falling behind
-`epsilon_crane_description`. That is how the pre-fit damping stayed baked into
-the shipped solver for four days. This test closes that gap: it re-expands the
-live xacro with the launch file's own arguments and demands the fixture match
-it byte for byte.
-"""
+`crane_mpc`'s `export_ocp.py --check` regenerates the solver from this snapshot
+and cannot see it fall behind `epsilon_crane_description` -- that is how pre-fit
+damping stayed in the shipped solver for four days. So: re-expand the live xacro
+with the launch file's own arguments and demand a byte match."""
 
 import difflib
 import importlib.util
@@ -42,9 +39,8 @@ def _lines(path):
 
 def test_fixture_matches_the_live_description(tmp_path):
     module = _launch_module()
-    # Not a skip. This is the only thing tying the fixture -- and through it the
-    # shipped acados solver -- to the description, and a guard that reports
-    # success when it could not look is worse than no guard.
+    # Not a skip: this is the only thing tying the fixture -- and the shipped
+    # acados solver -- to the description; a guard that passes blind is worse.
     try:
         share = get_package_share_directory(module.DESCRIPTION_PACKAGE)
     except PackageNotFoundError as error:

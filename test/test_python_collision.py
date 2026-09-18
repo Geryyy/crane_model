@@ -64,8 +64,7 @@ def test_a_block_at_the_tool_collides_and_a_distant_one_does_not():
 
 
 def test_the_arm_folded_back_over_the_base_is_refused_against_an_empty_scene():
-    """Self collision is checked even with nothing in the scene; the pairs the
-    fit calls not worth checking are the only ones excluded."""
+    """Self collision is checked even against an empty scene."""
     model = build(Tool.PZS100)
     folded = np.zeros(8)
     folded[1], folded[2] = -1.2, -0.91
@@ -75,10 +74,8 @@ def test_the_arm_folded_back_over_the_base_is_refused_against_an_empty_scene():
 
 
 def test_distance_tracks_the_gap_and_is_not_merely_a_flag():
-    """The reported distance is a signed distance, so it has to track the
-    geometry rather than only change sign at contact. Taken along +x, clear of
-    the machine; the per-primitive form is used because the machine's own 25 mm
-    self clearance is a separate result that would otherwise mask the scene."""
+    """A signed distance must track geometry, not only flip sign at contact.  Per
+    primitive: the machine's own 25 mm self clearance would otherwise mask it."""
     model = build(Tool.PZS100)
     q = np.zeros(8)
     gaps = np.array(
@@ -90,8 +87,7 @@ def test_distance_tracks_the_gap_and_is_not_merely_a_flag():
         ]
     )
     assert np.all(gaps > 0.0)
-    # One metre of travel is one metre of clearance, give or take the witness
-    # point sliding along the nearest link.
+    # 1 m of travel is 1 m of clearance, give or take witness-point slide.
     assert np.all(np.abs(np.diff(gaps) - 1.0) < 0.05)
 
 
@@ -108,8 +104,7 @@ def test_a_scene_that_repeats_an_id_or_leaves_one_empty_is_refused():
 
 
 def test_a_cylinder_given_a_radius_instead_of_an_extent_is_refused():
-    """dimensions_m is the extent along each axis, so a cylinder is (2r, 2r, l);
-    a caller who passed a radius is told rather than silently reinterpreted."""
+    """dimensions_m is the extent per axis: a cylinder is (2r, 2r, l), not r."""
     model = build(Tool.PZS100)
     wrong = CollisionPrimitive(
         "log",
@@ -123,16 +118,10 @@ def test_a_cylinder_given_a_radius_instead_of_an_extent_is_refused():
 
 
 def test_a_carried_body_ignores_the_grip_and_still_sees_the_world():
-    """
-    `attached_to_tool` is two rules, and both of them have to hold.
-
-    A payload sits *inside* the gripper -- that is what being gripped means --
-    so a body checked against the links holding it reports a collision at every
-    pose the machine can reach, and the planner refuses everything. Excluding
-    those links is only half the answer, though: a scene body is otherwise never
-    checked against another scene body, so the exclusion on its own would leave
-    the payload checked against nothing that matters.
-    """
+    """`attached_to_tool` is two rules and both have to hold: a payload sits
+    *inside* the gripper, so unexcluded it collides at every reachable pose, but
+    scene bodies are never checked against each other, so excluding alone would
+    leave it checked against nothing."""
     model = build(Tool.PZS100)
     q = np.zeros(8)
     q[[0, 1, 2, 3, 6]] = (0.0, -0.2, 0.4, 1.0, 0.0)
@@ -157,8 +146,6 @@ def test_a_carried_body_ignores_the_grip_and_still_sees_the_world():
     # Attached, the links holding it stop counting.
     assert model.collision_query(q, [payload(True)]).minimum_distance_m > 0.0
 
-    # And it is still a body in the world: an obstacle where it is, is a hit
-    # that names the obstacle, while one out of reach is not.
     inside = box("rock", at_tool.translation, side=0.4)
     result = model.collision_queries(q, [payload(True), inside])[0]
     assert result.minimum_distance_m < 0.0
@@ -168,12 +155,8 @@ def test_a_carried_body_ignores_the_grip_and_still_sees_the_world():
 
 
 def test_a_restricted_query_splits_the_machine_at_the_upper_hinge():
-    """
-    The sway envelope is owed by what hangs on the hinges and by nothing else,
-    so a caller must be able to ask the two halves separately. A block at the
-    tool is seen by the swinging half only, one at the base by the rigid half
-    only, and a restricted answer carries no self row.
-    """
+    """The sway envelope is owed by what hangs on the hinges, so the halves must
+    be askable separately. A restricted answer carries no self row."""
     model = build(Tool.PZS100)
     q = np.zeros(8)
     q[7] = 0.35

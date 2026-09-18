@@ -1,60 +1,28 @@
 """
 The crane's symbolic model, stated once in Python.
 
-This is the module `docs/features/cbs-ocp-python/grill.md` D8 asks for: the cpin
-model build, the mimic projection, the transmission and the output map, written
-once and *imported* by every export rather than restated in each of them.
-`crane_mpc/scripts/export_ocp.py` and `crane_planning/scripts/export_timing_ocp.py`
-are its consumers; `scripts/export_model_fixture.py` in this package is the third,
-and its output is what `test/test_symbolic_parity.cpp` compares against the
-numeric `crane_model`.
+A library: no `main`, writes nothing, imports neither `acados_template` nor ROS,
+so a consumer needs a solver neither to build nor to run. No cost, no
+constraint, no horizon. Consumers: `crane_mpc/scripts/export_ocp.py`,
+`crane_planning/scripts/export_timing_ocp.py`.
 
-It is a **library**. It has no `main`, it writes nothing, and it imports neither
-`acados_template` nor anything from ROS -- so the parity test needs a solver
-neither to build nor to run, and a disagreement with the numeric model is about
-the dynamics rather than about a toolchain.
+The non-obvious pieces: pinocchio drops `<mimic>`, so `q5_small_telescope` and
+`q11_right_rail_joint` are reconstructed through the projection P; damping comes
+from the description, overridable from `config/hydraulics.yaml`, but that table
+is empty since 2026-09-07 because the description now carries the same C3 fit
+`k` comes from; the payload body is a *symbol*, bound by the OCP (issue 072);
+the output map **z** smooths constraint 7 with `A±(v) sqrt(v² + eps²)` and
+`tanh(eps_v)`.
 
-What it builds is the symbolic model used for code generation:
-
-* Pinocchio's own `crba` and `nonLinearEffects`, over `casadi.SX`, on the parsed
-  description -- not a restatement of the equations of motion;
-* the mimic projection **P**, because Pinocchio drops `<mimic>` and
-  `q5_small_telescope` and `q11_right_rail_joint` have to be reconstructed;
-* the damping of `wiki/robot_model.md` §1, read out of the description and then
-  overridden where `config/hydraulics.yaml` says to -- the table is empty since
-  2026-09-07, because the description now carries the same C3 fit `k` comes
-  from and a faithful URDF read is the right model again;
-* the payload body at the mount frame, carried as a **symbol**: what it is bound
-  to is the OCP's business (issue 072);
-* the cylinder transmission of `wiki/hydraulics.md` §2--§4, from the same
-  `config/hydraulics.yaml` the C++ `cylinder_geometry.hpp` is evaluated with;
-* the Schur complement of `wiki/robot_model.md` §3.1 that separates the passive
-  rows from the actuated ones;
-* the output map **z**, with the `A±(v) sqrt(v² + eps²)` and `tanh(eps_v)`
-  smoothing `wiki/mpc.md` §3.1 requires of constraint 7.
-
-Nothing here is deleted from the C++ side and nothing here is an OCP: no cost, no
-constraint, no horizon, no solver.
-
-## The two coordinate sets, and why there are two
-
-`crane_model`'s own contract still carries **eight** canonical coordinates and a
-sixteen-state; issue 068's reduction is at the *OCP boundary*. So this module
-carries both, and says which is which everywhere:
-
-* `q`, `dq` -- the canonical eight of the model API contract §2, in the order
-  `theta1_slewing`, `theta2_boom`, `theta3_arm`, `q4_big_telescope`,
-  `theta6_tip`, `theta7_tilt`, `theta8_rotator`, tool. Indices `K_ACTUATED_ROWS`
-  are actuated and `K_PASSIVE_ROWS` are the two passive sway coordinates.
-* `x`, `u` -- what the OCPs plan. Without an actuator that is the rigid
-  `NX_RIGID = 14` and `NU = 5`; with one it is C3's `NX = 25` -- the rigid
-  fourteen, the command lag, the progress pair of
-  `docs/features/mpc-full-authority/brief.md` 2.1 and the force state -- over
-  `NU_PROGRESS = 6`. The tool coordinate is
-  not a decision variable, because the gripper is opened and closed by the
-  low-level controller; it arrives in the parameter vector `p` and its rate and
-  acceleration are zero. **Its link keeps its mass**, which is the whole reason
-  it is pinned rather than removed.
+Two coordinate sets: issue 068's reduction is at the *OCP boundary*, while the
+`crane_model` contract still carries eight coordinates and a sixteen-state.
+`q`/`dq` are the canonical eight (`theta1_slewing`, `theta2_boom`, `theta3_arm`,
+`q4_big_telescope`, `theta6_tip`, `theta7_tilt`, `theta8_rotator`, tool);
+`x`/`u` are what the OCPs plan -- rigid `NX_RIGID = 14`/`NU = 5`, or C3's
+`NX = 25` over `NU_PROGRESS = 6`. The tool coordinate is not a decision variable
+(the low-level controller works the gripper), so it arrives in `p` with zero
+rate and acceleration. **Its link keeps its mass** -- why it is pinned, not
+removed.
 """
 
 from __future__ import annotations
@@ -72,15 +40,14 @@ import yaml
 from .conventions import Tool, default_actuator_path, default_hydraulics_path
 from .description import parse as parse_description
 
-# --- the canonical eight of the model API contract §2 -------------------------
+# --- the canonical eight -----------------------------------------------------
 
 K_GENERALIZED_DOF = 8
 K_ACTUATED_DOF = 6
 K_PASSIVE_DOF = 2
 
-# I_a and I_u of `wiki/robot_model.md` §0.1. Neither class is contiguous, so
-# every block of M and every row of h is gathered through these rather than
-# sliced -- exactly as `detail::kActuatedRows` and `detail::kPassiveRows` are.
+# I_a and I_u. Neither class is contiguous: every block of M and every row of h
+# is gathered through these, not sliced -- as `detail::kActuatedRows` is.
 K_ACTUATED_ROWS = (0, 1, 2, 3, 6, 7)
 K_PASSIVE_ROWS = (4, 5)
 
@@ -88,22 +55,16 @@ K_PASSIVE_ROWS = (4, 5)
 K_TOOL_AXIS = 5
 
 # --- what the OCPs plan, after issue 068 --------------------------------------
-#
-# The actuated six minus the tool. `K_PLANNED_ROWS` is in canonical indices and
-# `K_PLANNED_AXES` in actuated ones, because the transmission and the output map
-# are written per *axis* and the mass matrix per *coordinate*.
+# The actuated six minus the tool. `K_PLANNED_ROWS` is canonical indices,
+# `K_PLANNED_AXES` actuated: transmission/output map per *axis*, M per *coordinate*.
 K_PLANNED_DOF = K_ACTUATED_DOF - 1
 K_PLANNED_ROWS = K_ACTUATED_ROWS[:K_PLANNED_DOF]
 K_PLANNED_AXES = tuple(range(K_PLANNED_DOF))
 
-# The rigid-body half of `x`: what the state was before the actuator arrived,
-# and what a consumer built without one still gets.
+# The rigid-body half of `x`: what a consumer built without an actuator gets.
 NX_RIGID = 2 * K_PLANNED_DOF + 2 * K_PASSIVE_DOF
 
-# The planned joint-velocity commands. This is what `u` is for a consumer built
-# without an actuator -- `crane_planning`'s timing OCP -- and it stays the name
-# of that block after the progress input arrives below, so nothing downstream
-# that means "one command per planned axis" has to be re-read.
+# The planned joint-velocity commands; `u` for a consumer built without actuator.
 NU = K_PLANNED_DOF
 
 # The blocks of `x`, in the order `crane_mpc/src/ocp.cpp` reduces to and expands
@@ -113,10 +74,8 @@ X_PASSIVE_POSITION = K_PLANNED_DOF
 X_PLANNED_VELOCITY = K_PLANNED_DOF + K_PASSIVE_DOF
 X_PASSIVE_VELOCITY = 2 * K_PLANNED_DOF + K_PASSIVE_DOF
 
-# --- C3, `wiki/hydraulic_actuator_model.md` §1 -------------------------------
-#
-# The fit's own keys for the five planned axes, in `K_PLANNED_AXES` order. The
-# gripper is in the file and is not planned here, so it is not in this tuple.
+# --- C3 -----------------------------------------------------------------------
+# Fit keys for the five planned axes; the gripper is in the file but not planned.
 K_AXIS_KEYS = ("sw", "ha", "ka", "sa", "ro")
 
 
@@ -125,14 +84,11 @@ class ActuatorFit:
     """
     C3's two fitted numbers per planned axis, in `K_PLANNED_AXES` order.
 
-    `k` is block 3's force-state stiffness and `tau_v` block 2's command lag.
-    Block 1, the 60 ms transport delay, is **not** here: it is common to every
-    axis and it lives in the node's predictor, not on the shooting grid
-    (`docs/features/mpc-full-authority/brief.md` §2.2). Damping is not here
-    either -- it reaches the dynamics through pinocchio's `model.damping` off
-    the description and stays there. It is the same C3 fit `k` below comes
-    from: `d_i` and `k_i` are one identification and only pair with each
-    other.
+    `k` is block 3's force-state stiffness, `tau_v` block 2's command lag. Block
+    1, the 60 ms transport delay, is **not** here: common to every axis, it lives
+    in the node's predictor. Damping is not here either -- it reaches the
+    dynamics through pinocchio's `model.damping`. Same C3 fit as `k`: `d_i` and
+    `k_i` only pair with each other.
     """
 
     k: tuple[float, ...]
@@ -147,12 +103,11 @@ class ActuatorFit:
 
 def load_actuator_fit(path=None) -> ActuatorFit:
     """
-    Read `config/c3_full_model.json`, the fit of `hydraulic_actuator_model.md` §2.
+    Read `config/c3_full_model.json`, the C3 fit.
 
-    A missing axis or a non-positive `k` is an exception and never a default, for
-    the same reason `load_constants` refuses one: a wrong actuator constant is a
-    wrong command, and it would be invisible in every quantity except the
-    response.
+    A missing axis or a non-positive `k` is an exception, never a default: a
+    wrong actuator constant is a wrong command, invisible in every quantity
+    except the response.
     """
     path = Path(path) if path is not None else Path(default_actuator_path())
     with open(path) as stream:
@@ -185,36 +140,23 @@ def load_actuator_fit(path=None) -> ActuatorFit:
 #: The fit as shipped. Read once, at import, because `NX` is derived from it.
 K_ACTUATOR_FIT = load_actuator_fit()
 
-#: The axes that carry a command-lag state, derived from the fit the way
-#: `K_PLANNED_AXES` is derived from the partition -- never written out by hand.
-#: `ka` (the arm) is fitted at `tau_v = 0`, so it has no `u_f` state and its
-#: `u_f` *is* `u`.
+#: The axes carrying a command-lag state, derived from the fit, never by hand.
+#: `ka` (the arm) is fitted at `tau_v = 0`: no `u_f` state, its `u_f` *is* `u`.
 K_LAG_AXES = K_ACTUATOR_FIT.lag_axes
 K_COMMAND_LAG_DOF = len(K_LAG_AXES)
 
-# The C3 state, extending the rigid-body offsets above rather than renumbering
-# them: the lagged command on the axes that have one, then the force state on
-# every planned axis.
+# The C3 state extends the rigid-body offsets rather than renumbering them.
 X_COMMAND_LAG = NX_RIGID
 
-# --- the progress pair, `docs/features/mpc-full-authority/brief.md` 2.1 --------
+# --- the progress pair --------------------------------------------------------
 #
-# `s` is **virtual time**, in seconds of nominal plan, and `v_s` is how fast the
-# plan is being spent -- seconds of plan per second of wall clock, so `v_s = 1`
-# is exactly time-indexed tracking. This is the *time-scaling* form and not the
-# contouring one: the reference is a spline in `time_from_start`, so there is no
-# arclength anywhere and no contour error to decompose. `docs/features/
-# corridor-mpc/brief.md` 5.1 carries a progress variable that means spatial
-# progress with a linear reward and no tracking term; the two are not composable
-# and this is the other one.
-#
-# The rate is a state and its **acceleration** is the input, one order above
-# Marc's `s_dot`-as-input, so the plan's speed cannot step between cycles.
-#
-# They sit *before* the force state and not at the end of `x` on purpose:
-# `v_s >= 0` ("the machine does not run the plan backwards") is a box, the force
-# states deliberately carry none, and acados' `idxbx` is only readable as "the
-# state row" while the boxed rows are a contiguous prefix.
+# `s` is **virtual time** in seconds of nominal plan; `v_s` seconds of plan per
+# second of wall clock, so `v_s = 1` is time-indexed tracking. Time-scaling, not
+# contouring: the reference is a spline in `time_from_start`. The acceleration is
+# the input, so the plan's speed cannot step between cycles. The pair sits
+# *before* the force state because `v_s >= 0` is a box, the force states
+# deliberately carry none, and acados' `idxbx` is only readable while the boxed
+# rows are a contiguous prefix.
 X_PROGRESS = NX_RIGID + K_COMMAND_LAG_DOF
 X_PROGRESS_RATE = X_PROGRESS + 1
 K_PROGRESS_DOF = 2
@@ -222,22 +164,17 @@ K_PROGRESS_DOF = 2
 X_ACTUATED_FORCE = X_PROGRESS + K_PROGRESS_DOF
 NX = NX_RIGID + K_COMMAND_LAG_DOF + K_PROGRESS_DOF + K_PLANNED_DOF
 
-# The boxed rows of `x`: everything up to the force state, which is bounded by
-# `wiki/mpc.md` 3's constraint 6 instead of by a box.
+# The boxed rows of `x`: everything up to the force state, which constraint 6
+# bounds instead of a box.
 NBX = X_ACTUATED_FORCE
 
-# `u` with the progress acceleration on the end, which is what a consumer with
-# an actuator plans. `NU` above stays the joint-command block.
+# `u` plus the progress acceleration; `NU` above stays the joint-command block.
 U_PROGRESS_ACCEL = NU
 NU_PROGRESS = NU + 1
 
 # --- the parameter vector -----------------------------------------------------
-#
-# One pinned tool coordinate and one payload body. The payload is ten numbers --
-# mass, the centre of mass in K8, and the six independent entries of Theta_L --
-# and it is a *symbol* here in both senses: this module never decides what it is,
-# and an OCP that wants it as a runtime acados parameter (issue 072) binds it
-# without rebuilding the model.
+# One pinned tool coordinate and one payload body: mass, CoM in K8, the six
+# independent entries of Theta_L. A *symbol*, so an OCP binds it at runtime (072).
 P_TOOL_POSITION = 0
 P_PAYLOAD_MASS = 1
 P_PAYLOAD_COM = 2
@@ -247,19 +184,16 @@ NP = 11
 # The order the six independent entries of a symmetric 3x3 are packed in.
 INERTIA_ENTRIES = ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
 
-# --- the output map z of `wiki/nomenclature.md` §10 ---------------------------
-#
-# Four blocks of six, the output-map offsets used by the generated model. It
-# stays six wide although the OCPs plan five: the tool cylinder is still in the
-# model, and reporting what it carries at the pinned configuration is how "the
-# transmission did not leave with the coordinate" stays checkable.
+# --- the output map z ---------------------------------------------------------
+# Four blocks of six -- six although the OCPs plan five: the tool cylinder is
+# still in the model, and reporting what it carries keeps that checkable.
 K_OUTPUT_DOF = 24
 K_ACTUATED_FORCE_OFFSET = 0
 K_CYLINDER_FORCE_OFFSET = 6
 K_PISTON_VELOCITY_OFFSET = 12
 K_AXIS_FLOW_OFFSET = 18
 
-# The link a payload attaches to (`wiki/robot_model.md` §5).
+# The link a payload attaches to.
 PAYLOAD_MOUNT_LINK = "K8_rotator_lower_part"
 
 
@@ -271,10 +205,8 @@ class Constants:
     """
     `config/hydraulics.yaml`, as read.
 
-    One field per entry of the C++ `crane_model::hydraulics::Constants`, with the
-    same name, because the two are the same file read twice. A number that
-    appears here and not in the file, or in the file and not here, is the drift
-    that file exists to make impossible.
+    One field per entry of the C++ `crane_model::hydraulics::Constants`, same
+    names: the two are the same file read twice.
     """
 
     r_gear: float = 0.0
@@ -314,10 +246,8 @@ class Constants:
     joints: tuple = ()
     damping_overrides: tuple = ()
 
-    # The sums the linkages actually rotate. Not measurements: each is a
-    # statement about which frame the other two numbers are expressed in, which
-    # is why `cylinder_geometry.hpp` writes them out too rather than folding
-    # them into the file.
+    # The sums the linkages actually rotate. Not measurements: each states which
+    # frame the other two numbers are in; `cylinder_geometry.hpp` writes them too.
     def boom_link_x(self) -> float:
         return self.boom_a2 + self.boom_ps2_x
 
@@ -410,13 +340,8 @@ def load_constants(path: Path | None = None) -> Constants:
 # ---------------------------------------------------- the cylinder transmission
 #
 # `src/cylinder_geometry.hpp`, term for term. Every linkage is planar, so a
-# planar vector is a two-tuple of scalars and the arithmetic is written out --
-# which is what makes the two readable side by side, and the reason the C++ is a
-# template rather than three functions in `model.cpp` in the first place.
-#
-# Nothing branches on the value of a coordinate. A configuration at which a
-# linkage does not close leaves a non-finite ratio rather than raising a flag,
-# because the symbolic caller has no configuration to raise one at.
+# planar vector is a two-tuple and the arithmetic is written out. Nothing
+# branches: where a linkage does not close the ratio is non-finite, not flagged.
 
 
 @dataclass
@@ -424,9 +349,8 @@ class AxisAreas:
     """
     Effective areas per axis.
 
-    `a_a`/`a_b` are the force-producing areas of `wiki/hydraulics.md` §4;
-    `a_eff_pos`/`a_eff_neg` the direction-dependent pump draw of §3. The rotator
-    carries V_m in all four, in m³/rad.
+    `a_a`/`a_b` are the force-producing areas, `a_eff_pos`/`a_eff_neg` the
+    direction-dependent pump draw. The rotator carries V_m in all four, m³/rad.
     """
 
     a_a: float = 0.0
@@ -436,7 +360,7 @@ class AxisAreas:
 
 
 def axis_areas(constants: Constants) -> list:
-    """Compose the areas of §6.1 per axis, as the circuit topology of §2 and §3 does."""
+    """Compose the per-axis areas, as the circuit topology does."""
     areas = [AxisAreas() for _ in range(K_ACTUATED_DOF)]
     # q1 slewing: two cylinders, symmetric circuit, so both chambers see 2 A_A.
     areas[0] = AxisAreas(
@@ -449,27 +373,24 @@ def axis_areas(constants: Constants) -> list:
     areas[1] = AxisAreas(
         constants.boom_a_a, constants.boom_a_b, constants.boom_a_a, constants.boom_a_b
     )
-    # q3 arm: two differential cylinders, one expression (§2.3).
+    # q3 arm: two differential cylinders, one expression.
     areas[2] = AxisAreas(
         2.0 * constants.arm_a_a,
         2.0 * constants.arm_a_b,
         2.0 * constants.arm_a_a,
         2.0 * constants.arm_a_b,
     )
-    # q4 telescope: regenerative on extension. Rod-side oil is fed back to the
-    # piston side, so only the annulus difference is drawn from the pump, while
-    # the force still follows the physical areas -- which is why a_a and
-    # a_eff_pos differ on this axis alone.
+    # q4 telescope: regenerative on extension -- rod-side oil feeds back, so the
+    # pump sees only the annulus difference while force follows physical areas.
     areas[3] = AxisAreas(
         constants.telescope_a_a,
         constants.telescope_a_b,
         constants.telescope_a_a - constants.telescope_a_b,
         constants.telescope_a_b,
     )
-    # q7 rotator: a motor, where V_m takes the role the piston area plays
-    # elsewhere (§2.5). Symmetric in both directions.
+    # q7 rotator: a motor; V_m takes the piston area's role. Symmetric.
     areas[4] = AxisAreas(constants.v_m, constants.v_m, constants.v_m, constants.v_m)
-    # q8 tool: a cylinder axis on the same pump, areas per §6.1.
+    # q8 tool: a cylinder axis on the same pump.
     areas[5] = AxisAreas(
         constants.tool_a_a, constants.tool_a_b, constants.tool_a_a, constants.tool_a_b
     )
@@ -483,7 +404,7 @@ def _rotate(angle, value):
 
 
 def _perpendicular(value):
-    """S_perp v, the planar 90 degree rotation of `wiki/nomenclature.md` §7."""
+    """S_perp v, the planar 90 degree rotation."""
     return (-value[1], value[0])
 
 
@@ -513,13 +434,12 @@ def _norm(value):
 
 def boom_ratio(constants: Constants, q2):
     """
-    ds_2/dq_2, `wiki/hydraulics.md` §2.2.
+    ds_2/dq_2.
 
-    The cylinder drives the coupler point p_J of a four-bar and not the boom
-    directly, so s_2 is the distance from the cylinder foot p_S0 to that coupler
-    point and the derivative is the analytic chain rule through p_J(d²(q2)) --
-    exact, not a difference quotient. A q2 at which the triangle inequality on
-    d, r_13 and r_23 fails leaves `delta` negative, and the ratio not finite.
+    The cylinder drives a four-bar's coupler point p_J, not the boom, so s_2 is
+    |p_J - p_S0| and the derivative is the analytic chain rule through p_J(d²(q2))
+    -- exact, not a difference quotient. Where the triangle inequality on d, r_13,
+    r_23 fails, `delta` goes negative and the ratio non-finite.
     """
     p_s0 = (constants.boom_ps0_x, constants.boom_ps0_y)
     p_s1 = (constants.boom_ps1_x, constants.boom_ps1_y)
@@ -545,10 +465,8 @@ def boom_ratio(constants: Constants, q2):
     delta_gradient = (
         reach_sum * reach_sum + reach_difference * reach_difference - 2.0 * d_squared
     )
-    # The branch is fixed by the derivation: the intersection whose local y is
-    # negative in the frame with p_S1 at the origin and p_S2 on +x (§2.2). Since
-    # S_perp d points along local +y, that is the negative root, and it is the
-    # branch whose stroke spans the s_2 limits of §6.3.
+    # Branch fixed by the derivation: negative local y in the frame with p_S1 at
+    # origin and p_S2 on +x, i.e. the negative root; it spans the s_2 limits.
     beta = -root / (2.0 * d_squared)
     beta_rate = (
         -(delta_gradient * d_squared / root - 2.0 * root)
@@ -573,18 +491,15 @@ def boom_ratio(constants: Constants, q2):
 
 def arm_ratio(constants: Constants, q3):
     """
-    ds_3/dq_3, `wiki/hydraulics.md` §2.3.
+    ds_3/dq_3.
 
-    A direct cylinder: the in-plane part rotates with q3 while the out-of-plane
-    offset stays constant.
-
-    That offset is **zero** in the shipped constants (`arm_ps4_y - arm_ps3_z`,
-    both 0.224) and `wiki/hydraulics.md` §2.3 says the linkage is planar as
-    built, so it does *not* keep the stroke away from zero as this docstring
-    used to claim. The ratio has a transmission dead point at q3 = 1.8466647,
-    where the pivot and both attachments are collinear, and is negative above
-    it. Finite throughout; see issue 126. What keeps that point off the solver
-    is `crane_mpc`'s control-safe box, not the geometry.
+    A direct cylinder: the in-plane part rotates with q3, the out-of-plane
+    offset stays constant. That offset is **zero** in the shipped constants
+    (`arm_ps4_y - arm_ps3_z`, both 0.224) and the linkage is planar as built, so
+    it does *not* keep the stroke away from zero. Transmission dead point at
+    q3 = 1.8466647, where the pivot and both attachments are collinear; negative
+    above it, finite throughout (issue 126). `crane_mpc`'s control-safe box, not
+    the geometry, keeps that point off the solver.
     """
     moving = _rotate(q3, (constants.arm_link_x(), constants.arm_link_y()))
     in_plane = _sub(moving, (constants.arm_ps3_x, constants.arm_ps3_y))
@@ -599,22 +514,19 @@ def jacobian_diagonal(constants: Constants, q2, q3) -> list:
     """
     Return the diagonal of J_cyl, which is the whole of it.
 
-    The geometry does not couple the axes at all (`wiki/hydraulics.md` §5.7), so
-    the off-diagonal entries are structurally zero and are never formed. Only q2
-    and q3 enter; the other four axes are a constant radius or one-to-one.
+    The geometry couples no axes: off-diagonals are structurally zero and never
+    formed. Only q2 and q3 enter; the other four are constant or one-to-one.
     """
     diagonal = [None] * K_ACTUATED_DOF
-    # q1 slewing: rack and pinion, the only constant transmission (§2.1).
+    # q1 slewing: rack and pinion, the only constant transmission.
     diagonal[0] = ca.SX(constants.r_gear)
     diagonal[1] = boom_ratio(constants, q2)
     diagonal[2] = arm_ratio(constants, q3)
-    # q4 telescope: the cylinder is one-to-one with the joint coordinate; the
-    # factor of two sits between q4 and the tip travel, not here (§2.4).
+    # q4 telescope: one-to-one; the factor of two is between q4 and tip travel.
     diagonal[3] = ca.SX(1.0)
-    # q7 rotator: a motor, so the motor angle is the joint coordinate (§2.5).
+    # q7 rotator: a motor, so the motor angle is the joint coordinate.
     diagonal[4] = ca.SX(1.0)
-    # q8 tool (§2.6): the PZS100 rail cylinder is one-to-one with q8 and there
-    # is no linkage to solve.
+    # q8 tool: the PZS100 rail cylinder is one-to-one with q8, no linkage.
     diagonal[5] = ca.SX(1.0)
     return diagonal
 
@@ -641,10 +553,9 @@ class CoupledJoint:
     """
     A joint the description declares as a `<mimic>` of a canonical one.
 
-    Two of them matter: `q5_small_telescope` mimics `q4_big_telescope`, the second
-    telescope stage of `wiki/robot_model.md` §0, and the PZS100's
-    `q11_right_rail_joint` mimics `q9_left_rail_joint`. The multiplier and the
-    offset are read out of the description and not assumed.
+    Two matter: `q5_small_telescope` mimics `q4_big_telescope` (the second
+    telescope stage) and `q11_right_rail_joint` mimics `q9_left_rail_joint`.
+    Multiplier and offset are read out of the description, not assumed.
     """
 
     name: str
@@ -664,11 +575,9 @@ class Description:
     neutral: np.ndarray
     joints: list = field(default_factory=list)
     coupled: list = field(default_factory=list)
-    # P of the numeric model, one entry per canonical coordinate: a list
-    # of `(velocity_index, weight)`, the coordinate's own row first and then one
-    # row per `<mimic>` that follows it. dq_full = P dq, so M = Pᵀ M_full P and
-    # h = Pᵀ h_full -- which is how the second telescope stage and the mirrored
-    # rail get their inertia counted on the coordinate that drives them.
+    # P, one entry per canonical coordinate: `(velocity_index, weight)`, own row
+    # first then one per `<mimic>`. dq_full = P dq, M = Pᵀ M_full P, h = Pᵀ h_full
+    # -- how the telescope's second stage and the mirrored rail get their inertia.
     drives: list = field(default_factory=list)
     damping: list = field(default_factory=list)
     mount_joint: int = 0
@@ -690,15 +599,12 @@ def parse(
     """
     Parse one description onto the canonical eight coordinates.
 
-    The description is read twice on purpose, exactly as `detail::parse` reads it
-    twice: Pinocchio builds the kinematic tree and **drops `<mimic>`** -- with
-    mimic parsing on it refuses the PZS100 outright, which declares the right
-    rail as a mimic of a joint that comes later in its own depth-first order --
-    so the coupled joints come from the XML itself rather than being assumed.
+    Read twice, as `detail::parse` does: pinocchio builds the tree and **drops
+    `<mimic>`**, and with mimic parsing on it refuses the PZS100 outright (the
+    right rail mimics a joint later in its own depth-first order).
     """
-    # The canonical mapping -- joint binding, the `<mimic>` scan, P and the
-    # per-joint damping -- belongs to `crane_model.description`, which the C++
-    # library's Python counterpart uses too. Read there, not restated here.
+    # The canonical mapping -- joint binding, `<mimic>` scan, P, per-joint
+    # damping -- lives in `crane_model.description`. Read there.
     shared = parse_description(
         description_xml, Tool(tool), gravity, names=tuple(constants.joints)
     )
@@ -734,11 +640,8 @@ def parse(
     ]
     out.damping = list(shared.damping)
 
-    # Except where `config/hydraulics.yaml` says otherwise. The override table is
-    # data carrying its own reason, so this loop has no idea that the joint on it
-    # today is the telescope: it applies whatever the file lists, and a table
-    # naming a joint that is not one of the canonical eight is a failure rather
-    # than a line that quietly does nothing.
+    # Except where `config/hydraulics.yaml` says otherwise. A table naming a
+    # non-canonical joint is a failure, not a line that quietly does nothing.
     for name, value in constants.damping_overrides:
         if name not in canonical:
             raise ValueError(
@@ -762,10 +665,8 @@ class CraneSymbolicModel:
     """
     The equations of motion of one description, as `casadi.SX`.
 
-    Built once and read many times. Every expression below is an attribute, so a
-    consumer that wants something this module does not wrap in a `Function` --
-    an OCP writing its own residual, say -- reaches the graph directly instead of
-    rebuilding it.
+    Every expression is an attribute, so a consumer wanting something not wrapped
+    in a `Function` reaches the graph directly instead of rebuilding it.
     """
 
     def __init__(
@@ -782,19 +683,16 @@ class CraneSymbolicModel:
         self.actuator = actuator
 
         # --- the symbols -----------------------------------------------------
-        # The progress pair rides with the actuator, because the C3 branch is the
-        # only consumer that has a `u` to spend time with; `actuator=None` is
-        # `crane_planning`'s timing OCP and its `x` and `u` are unchanged.
+        # The progress pair rides with the actuator: only the C3 branch has a `u`
+        # to spend time with. `actuator=None` leaves `x` and `u` unchanged.
         self.x = ca.SX.sym("x", NX if actuator is not None else NX_RIGID)
         self.u = ca.SX.sym("u", NU_PROGRESS if actuator is not None else NU)
         self.p = ca.SX.sym("p", NP)
         self.q_tool = self.p[P_TOOL_POSITION]
         self.payload = self.p[P_PAYLOAD_MASS:NP]
 
-        # The canonical eight, put back together out of what this problem plans
-        # and the pinned tool coordinate. The tool's rate and its acceleration
-        # are zero -- the gripper is held by the low-level controller, so no plan
-        # written against this model can move it.
+        # The canonical eight, reassembled from what this problem plans plus the
+        # pinned tool coordinate. Tool rate and acceleration are zero.
         self.q = ca.SX.zeros(K_GENERALIZED_DOF)
         self.dq = ca.SX.zeros(K_GENERALIZED_DOF)
         for axis, row in enumerate(K_PLANNED_ROWS):
@@ -816,16 +714,13 @@ class CraneSymbolicModel:
         planned = list(K_PLANNED_AXES)
         self.ddq_a = ca.SX.zeros(K_ACTUATED_DOF)
         if actuator is None:
-            # No actuator: the input *is* the actuated acceleration, the passive
-            # rows follow it, and `tau_a` is the inverse dynamics that produced
-            # it. This is the map `crane_planning`'s timing OCP inverts.
+            # No actuator: the input *is* the actuated acceleration, passive rows
+            # follow it, `tau_a` is the inverse dynamics that produced it.
             for axis in K_PLANNED_AXES:
                 self.ddq_a[axis] = self.u[axis]
 
-            # `wiki/robot_model.md` §3.1: ddq_u = -M_uu⁻¹ (M_ua ddq_a + h_u),
-            # with h_u already carrying D_uu dq_u. Two by two, so the inverse is
-            # the adjugate and there is no factorisation to branch on -- a
-            # configuration where M_uu is singular leaves a non-finite expression.
+            # ddq_u = -M_uu⁻¹ (M_ua ddq_a + h_u); h_u already carries D_uu dq_u.
+            # 2x2, so the adjugate; a singular M_uu leaves a non-finite expression.
             right_hand = h_u + ca.mtimes(m_ua, self.ddq_a)
             determinant = m_uu[0, 0] * m_uu[1, 1] - m_uu[0, 1] * m_uu[1, 0]
             self.ddq_u = ca.vertcat(
@@ -834,10 +729,8 @@ class CraneSymbolicModel:
                 -(m_uu[0, 0] * right_hand[1] - m_uu[1, 0] * right_hand[0])
                 / determinant,
             )
-            # tau_a of §3.3, the actuated rows of M ddq + h at the consistent
-            # passive acceleration. It equals M_eff u + h_eff of §3.4 and is the
-            # quantity `wiki/mpc.md` §2's effort term and §3's constraint 6 are
-            # written in.
+            # tau_a: the actuated rows of M ddq + h at the consistent passive
+            # acceleration. Equals M_eff u + h_eff; constraint 6 is written in it.
             self.tau_a = h_a + ca.mtimes(m_aa, self.ddq_a) + ca.mtimes(m_au, self.ddq_u)
             self.u_f = self.u
             self.progress = None
@@ -857,13 +750,10 @@ class CraneSymbolicModel:
                 self.ddq_u,
             )
         else:
-            # C3, `wiki/hydraulic_actuator_model.md` §1, blocks 2, 3 and 5. Block
-            # 1, the 60 ms transport delay, is deliberately absent: it is the
-            # node's predictor and putting a second copy here double-counts it.
-            #
-            # Block 2, the PT1 command lag. Only the axes the fit gives a
-            # positive tau_v get a state; on the arm tau_v is zero, which is a
-            # pole at infinity, so its lagged command is the command itself.
+            # C3 blocks 2, 3 and 5. Block 1, the 60 ms transport delay, is
+            # deliberately absent: it lives in the node's predictor and a copy
+            # here would double-count it. Block 2, the PT1 lag: only axes with
+            # positive tau_v get a state; the arm's is 0, so its `u_f` is `u`.
             dq_a = self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF]
             lag_slot = {axis: slot for slot, axis in enumerate(K_LAG_AXES)}
             self.u_f = ca.vertcat(
@@ -881,9 +771,9 @@ class CraneSymbolicModel:
                 ]
             )
 
-            # Block 3, the force state. It is a *state* now, so `tau_a` is read
-            # off `x` rather than assembled -- which is what turns `wiki/mpc.md`
-            # §3's constraint 6 into `x_j / J_c,ii(q)` and drops crba out of it.
+            # Block 3, the force state. A *state*, so `tau_a` is read off `x`
+            # rather than assembled -- which turns constraint 6 into
+            # `x_j / J_c,ii(q)` and drops crba out of it.
             tau_p = self.x[X_ACTUATED_FORCE : X_ACTUATED_FORCE + K_PLANNED_DOF]
             self.actuated_force_rate = ca.vertcat(
                 *[
@@ -892,14 +782,11 @@ class CraneSymbolicModel:
                 ]
             )
 
-            # Block 5, the load: forward dynamics, torque to acceleration. This
-            # is ABA's arrow, but **not** `cpin.aba`: the parsed model has 18
-            # velocity rows and a `<mimic>` projection P over them, so ABA on it
+            # Block 5, the load: forward dynamics. ABA's arrow but **not**
+            # `cpin.aba` -- the parsed model has 18 velocity rows under P, so ABA
             # would let the four cylinder sub-chains and the mimicked telescope
-            # half move freely. The projected system P'MP ddq + P'h = tau is what
-            # `self.mass`/`self.bias` already are, so forward dynamics here is
-            # one dense solve of it -- seven rows, because the tool coordinate is
-            # pinned at ddq = 0 and its row is a constraint torque nobody reads.
+            # half move freely. `self.mass`/`self.bias` are already P'MP and P'h,
+            # so this is one dense solve of seven rows; the tool is pinned.
             m_pp = m_aa[planned, planned]
             m_pu = m_au[planned, :]
             system = ca.blockcat([[m_pp, m_pu], [self.mass_ua, m_uu]])
@@ -909,9 +796,8 @@ class CraneSymbolicModel:
             for axis in K_PLANNED_AXES:
                 self.ddq_a[axis] = ddq_p[axis]
 
-            # The tool row of tau_a is still the constraint torque that holds the
-            # gripper still, and the output map reports all six. Only the planned
-            # five come out of the state.
+            # tau_a's tool row is the constraint torque holding the gripper
+            # still; the output map reports six, only five come from the state.
             tau_tool = (
                 h_a[K_TOOL_AXIS]
                 + ca.mtimes(m_aa[K_TOOL_AXIS, :], self.ddq_a)
@@ -919,11 +805,9 @@ class CraneSymbolicModel:
             )
             self.tau_a = ca.vertcat(tau_p, tau_tool)
 
-            # The force state that holds the machine still at this configuration,
-            # i.e. h_eff of `wiki/robot_model.md` §3.4. There is no force
-            # measurement anywhere in the stack, so this is what a consumer seeds
-            # the force state with; seeding it at zero would start every horizon
-            # with the hydraulics switched off and the boom in free fall.
+            # The force state holding the machine still here, i.e. h_eff. No force
+            # measurement exists in the stack, so a consumer seeds with this; zero
+            # would start every horizon with the hydraulics off, boom in free fall.
             determinant = m_uu[0, 0] * m_uu[1, 1] - m_uu[0, 1] * m_uu[1, 0]
             ddq_u_static = ca.vertcat(
                 -(m_uu[1, 1] * h_u[0] - m_uu[0, 1] * h_u[1]) / determinant,
@@ -931,10 +815,8 @@ class CraneSymbolicModel:
             )
             self.actuated_force_static = h_a[planned] + ca.mtimes(m_pu, ddq_u_static)
 
-            # The progress pair: `s` advances at `v_s` and `v_s` is driven by the
-            # sixth input. Nothing else in the plant reads either row -- the
-            # coupling to the machine is entirely through the cost, which is
-            # where the reference is evaluated at `s`.
+            # `s` advances at `v_s`, driven by the sixth input. Nothing else in
+            # the plant reads either row; the coupling is through the cost.
             self.progress = self.x[X_PROGRESS]
             self.progress_rate = self.x[X_PROGRESS_RATE]
             self.progress_accel = self.u[U_PROGRESS_ACCEL]
@@ -961,10 +843,8 @@ class CraneSymbolicModel:
         """
         M and h + D dq in the canonical eight coordinates.
 
-        The same `crba` and `nonLinearEffects` the numeric path calls, on the
-        same parsed description, through the same projection P, with the same
-        damping and the same payload body. Nothing here restates a term of the
-        equations of motion.
+        The same `crba`/`nonLinearEffects` the numeric path calls, same parsed
+        description, same P, damping and payload body. Nothing restates a term.
         """
         model = cpin.Model(self.description.model)
         mount = self.description.mount_joint
@@ -972,9 +852,8 @@ class CraneSymbolicModel:
         for entry, (row, column) in enumerate(INERTIA_ENTRIES):
             inertia[row, column] = payload[P_PAYLOAD_INERTIA - P_PAYLOAD_MASS + entry]
             inertia[column, row] = inertia[row, column]
-        # Theta_L is about the payload's own centre of mass with the axes of K8,
-        # which is the URDF `<inertial>` convention; `act` carries the whole body
-        # from K8 into the frame of the joint that moves it.
+        # Theta_L is about the payload's own CoM with K8's axes (the URDF
+        # `<inertial>` convention); `act` carries the body into the joint frame.
         body = cpin.Inertia(
             payload[0],
             payload[
@@ -991,9 +870,8 @@ class CraneSymbolicModel:
         cpin.crba(model, data, configuration)
         cpin.nonLinearEffects(model, data, configuration, velocity)
 
-        # `crba` fills the upper triangle of data.M only, so the lower half is
-        # read back transposed rather than mirrored into place -- the same
-        # reading `Model::Impl::mass_entry` does.
+        # `crba` fills only the upper triangle of data.M, so the lower half is
+        # read back transposed -- the same reading `Model::Impl::mass_entry` does.
         def entry(row, column):
             return data.M[row, column] if row <= column else data.M[column, row]
 
@@ -1022,9 +900,8 @@ class CraneSymbolicModel:
         """
         Spread q and dq of the canonical eight over the parsed model's rows.
 
-        The mimics follow their source and every joint outside both sets keeps its
-        neutral value and zero velocity: the four cylinder sub-chains are loops
-        the description closes only in Gazebo.
+        Mimics follow their source; every other joint keeps its neutral value and
+        zero velocity (the cylinder sub-chains close only in Gazebo).
         """
         model = self.description.model
         configuration = ca.SX(self.description.neutral)
@@ -1062,12 +939,12 @@ class CraneSymbolicModel:
 
     def _output_map(self):
         """
-        z, the algebraic output of `wiki/nomenclature.md` §10, in four blocks of six.
+        z, the algebraic output, in four blocks of six.
 
-        `wiki/mpc.md` §3.1 requires both non-smooth pieces of constraint 7 to be
-        smoothed for a gradient-based solver: |v| by sqrt(v² + eps²), and the step
-        in A^± at v = 0 by a tanh of width eps_v. `Model::transmission` keeps the
-        physical step, because it is not being differentiated.
+        Both non-smooth pieces of constraint 7 are smoothed for a gradient-based
+        solver: |v| by sqrt(v² + eps²), the step in A^± at v = 0 by a tanh of
+        width eps_v. `Model::transmission` keeps the physical step -- it is not
+        differentiated.
         """
         areas = axis_areas(self.constants)
         dq_a = ca.vertcat(*[self.dq[row] for row in K_ACTUATED_ROWS])
@@ -1101,10 +978,10 @@ class CraneSymbolicModel:
 
     def chamber_force(self, p_a, p_b):
         """
-        F_i = A_A p_A - A_B p_B (`wiki/hydraulics.md` §4).
+        F_i = A_A p_A - A_B p_B.
 
-        For the rotator both areas are V_m, so that entry is a torque in N m
-        rather than a force in N.
+        For the rotator both areas are V_m, so that entry is a torque in N m,
+        not a force in N.
         """
         areas = axis_areas(self.constants)
         return ca.vertcat(
@@ -1118,12 +995,9 @@ class CraneSymbolicModel:
         """
         Wrap the model as `casadi.Function`s, named `<prefix>_<what>`.
 
-        One evaluation carries the dynamics, the reduction and the output map
-        together, because they are one expression graph and splitting them would
-        put three copies of `crba` in the generated C. The small maps beside it
-        are separate because each is asserted on its own: a projection error can
-        cancel in a mass matrix, and a damping override that never arrived is
-        invisible in every quantity except the damping.
+        One evaluation carries dynamics, reduction and output map together: one
+        graph, and splitting it would put three copies of `crba` in the generated
+        C. The small maps are separate so each can be asserted on its own.
         """
         q = ca.SX.sym("q", K_GENERALIZED_DOF)
         dq = ca.SX.sym("dq", K_GENERALIZED_DOF)
@@ -1173,12 +1047,9 @@ class CraneSymbolicModel:
             ),
         ]
 
-        # One function per `<mimic>` the description declares, named after the
-        # joint it reconstructs. Pinocchio dropped these, so an export that
-        # forgot to put them back builds a model whose telescope is half as long
-        # -- and the failure would be a plausible mass matrix rather than a
-        # missing symbol. Naming the joint in the symbol is what makes the
-        # absence a link error instead.
+        # One function per `<mimic>`, named after the joint it reconstructs. An
+        # export that forgets one gets a half-length telescope -- a plausible mass
+        # matrix, not a missing symbol. The name makes the absence a link error.
         for coupled in self.description.coupled:
             out.append(
                 ca.Function(

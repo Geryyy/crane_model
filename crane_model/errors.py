@@ -2,7 +2,7 @@
 Failure model for the Python crane model.
 
 The C++ API returns `Result<T>`; here a failure is an exception carrying the
-same `ErrorCode`, so call sites read as straight-line numeric code.
+same `ErrorCode`.
 """
 
 from __future__ import annotations

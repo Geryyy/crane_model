@@ -5,3 +5,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+# MuJoCo appends its warnings here, in whatever directory a run started in.
+MUJOCO_LOG.TXT
+
+# mj_printModel / mj_printData dumps
+MJDATA.TXT
+MJMODEL.TXT

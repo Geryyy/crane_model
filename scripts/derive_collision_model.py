@@ -2,34 +2,26 @@
 """
 Derive the collision model of `crane_model` from the machine descriptions.
 
-Two artefacts come out of this script and both are checked in:
+Emits three checked-in artefacts: the primitive table and allowed-pair list of
+`src/collision_model.hpp` on stdout, `config/collision_model.yaml`
+(`--write-yaml`) and `config/allowed_collisions.srdf` (`--write-srdf`). C++ and
+YAML must come out of one run -- `test/test_python_collision.py` compares them.
 
-* the per-link primitive table compiled into `src/model.cpp`, printed as C++ on
-  stdout, and
-* `config/allowed_collisions.srdf`, the allowed-collision list of
-  `wiki/trajectory_planning.md` §4.2, written with `--write-srdf`.
-
-It runs **once**, offline, and is not part of the build. The reason it has to is
-that the descriptions carry their link collision geometry as `package://` STL
-meshes. `crane_model` is ROS-free and `ModelConfig` carries the description XML
-and nothing else, so the library cannot resolve a package URI or read a mesh
-file at runtime. The primitives are therefore fitted here, where the meshes are
-on disk, and the fit is checked in. `test_contract.cpp` ties each entry back to
-the `<collision>` element it was fitted to, so a description that moves a
-collision origin or swaps a mesh fails the build instead of silently keeping
-this fit.
-
-The queries below go through the same Coal that `src/model.cpp` links, so the
-list is derived against the geometry it will filter and not against a
-re-implementation of it.
+Runs once, offline, not part of the build: the descriptions name collision
+geometry by `package://` mesh URI and the ROS-free library cannot resolve one at
+runtime. Each entry records the `<collision>` element it was fitted to, so a
+moved origin or swapped mesh shows in the diff of a re-run; nothing asserts it
+today. Queries use the same Coal `src/model.cpp` links.
 
 Usage:
 
     ./scripts/derive_collision_model.py \
         --description pzs100=test/description/pzs100.urdf \
-        --package epsilon_crane_description=../../src/epsilon_crane_description \
-        --package pzs100_description=../../src/crane_tools_description/pzs100 \
-        --write-srdf config/allowed_collisions.srdf
+        --package epsilon_crane_description=../../epsilon_crane_description \
+        --package pzs100_description=../../crane_tools_description/pzs100 \
+        --write-yaml config/collision_model.yaml \
+        --write-srdf config/allowed_collisions.srdf \
+        > /tmp/table.cxx
 """
 
 from __future__ import annotations
@@ -44,10 +36,9 @@ from pathlib import Path
 import coal
 import numpy as np
 
-# The eight canonical coordinates of the model API contract §2. Every other
-# movable joint stays at its neutral value, exactly as `Model::Impl::
-# write_configuration` leaves it: the cylinder sub-chains are loops the
-# description closes only in Gazebo and carry no collision geometry.
+# Canonical coordinates of the model API. Every other movable joint stays
+# neutral, as `Model::Impl::write_configuration` leaves it: the cylinder
+# sub-chains are loops closed only in Gazebo and carry no collision geometry.
 CANONICAL = [
     "theta1_slewing_joint",
     "theta2_boom_joint",
@@ -118,8 +109,6 @@ def parse_origin(element) -> tuple[np.ndarray, np.ndarray]:
 
 
 class Description:
-    """The parts of a URDF this derivation needs: the tree, the limits, the shapes."""
-
     def __init__(self, path: Path, packages: dict[str, Path]):
         self.path = path
         self.root = ET.parse(path).getroot()
@@ -146,7 +135,6 @@ class Description:
         return float(limit.get("lower")), float(limit.get("upper"))
 
     def collisions(self) -> dict[str, list[dict]]:
-        """Return the `<collision>` elements per link, with their geometry resolved."""
         found: dict[str, list[dict]] = {}
         for link in self.root.findall("link"):
             for collision in link.findall("collision"):
@@ -255,12 +243,10 @@ class Description:
 
 
 class Primitive:
-    """An enclosing convex primitive: its kind, its extents, its frame in the link."""
-
     def __init__(
         self, kind: str, extents: np.ndarray, rotation: np.ndarray, centre: np.ndarray
     ):
-        self.kind = kind  # "capsule" or "box"
+        self.kind = kind
         self.extents = extents  # capsule: (radius, half length); box: half sides
         self.rotation = rotation
         self.centre = centre
@@ -336,10 +322,9 @@ def fit_capsule(points: np.ndarray) -> Primitive:
     """
     Fit the tightest capsule about `points` on their principal direction.
 
-    The radius is the largest distance from the axis. The spine is then the
-    shortest segment that still encloses every point: a point at axial offset t
-    and radial offset d is inside as long as the spine reaches t - sqrt(R^2 -
-    d^2), so the two ends are the extreme values of that expression.
+    Radius = max distance from the axis. A point at axial offset t, radial
+    offset d is inside once the spine reaches t - sqrt(R^2 - d^2), so the two
+    ends are the extremes of that expression.
     """
     centroid = points.mean(axis=0)
     centred = points - centroid
@@ -361,12 +346,7 @@ def fit_capsule(points: np.ndarray) -> Primitive:
 
 
 def fit_box(points: np.ndarray) -> Primitive:
-    """
-    Fit the bounding box on the principal axes of `points`.
-
-    Exact for a link whose `<collision>` already is a `<box>`: the principal
-    axes of the eight corners are the box's own axes.
-    """
+    """Fit the box on the principal axes; exact when the `<collision>` is a `<box>`."""
     centred = points - points.mean(axis=0)
     rotation = np.linalg.svd(centred, full_matrices=False)[2].T
     if np.linalg.det(rotation) < 0.0:
@@ -385,12 +365,10 @@ def fit_primitive(points: np.ndarray) -> Primitive:
     """
     Return the smaller of the two enclosing primitives.
 
-    trajectory_planning 4.2 asks for capsules, and for the beams -- boom, arm,
-    both telescope stages -- that is what this returns. It is the wrong shape
-    for the chunky links: the capsule around the mounting base has a 0.98 m
-    radius, which would refuse motions that clear it by a metre. Both candidates
-    enclose the geometry, so taking the smaller one is safe in the direction
-    that matters and only ever tighter.
+    Capsules are the intended shape and are what the beams -- boom, arm, both
+    telescope stages -- get. Wrong for chunky links: the capsule round the
+    mounting base has a 0.98 m radius and would refuse motions clearing it by a
+    metre. Both candidates enclose, so the smaller is only ever tighter.
     """
     candidates = [fit_capsule(points), fit_box(points)]
     return min(candidates, key=lambda candidate: candidate.volume())
@@ -407,10 +385,9 @@ def adjacent_pairs(description: Description, links: set[str]) -> set[tuple[str, 
     """
     Return the pairs with no third collision link between them in the tree.
 
-    Plain parent-and-child is not the right test here: the descriptions put
-    unshaped helper links (`moved_with_q1`, the DH frames) between two links
-    that really are neighbours, and a pair separated only by those cannot be
-    pulled apart by any joint.
+    Not plain parent-and-child: unshaped helper links (`moved_with_q1`, DH
+    frames) sit between real neighbours, and a pair separated only by those
+    cannot be pulled apart by any joint.
     """
     pairs: set[tuple[str, str]] = set()
     for link in links:
@@ -430,7 +407,7 @@ def adjacent_pairs(description: Description, links: set[str]) -> set[tuple[str, 
 def derive_matrix(
     description: Description, shapes: dict[str, Primitive], samples: int, seed: int
 ) -> dict[tuple[str, str], str]:
-    """Return the disabled pairs and why, in the categories the legacy SRDF uses."""
+    """Return the disabled pairs and the reason category of each."""
     links = collision_links(shapes)
     movable = CANONICAL + [TOOL_JOINT]
     lower = np.array([description.limits(name)[0] for name in movable])
@@ -438,8 +415,7 @@ def derive_matrix(
 
     generator = np.random.default_rng(seed)
     draws = generator.uniform(lower, upper, size=(samples, len(movable)))
-    # The neutral configuration the model itself starts from, clamped into the
-    # limits so it is a configuration the machine can actually stand in.
+    # Neutral configuration, clamped into limits so the machine can stand in it.
     draws = np.vstack((np.clip(np.zeros(len(movable)), lower, upper), draws))
 
     geometries = {link: shapes[link].coal() for link in links}
@@ -485,12 +461,7 @@ def derive_matrix(
 
 
 def cxx_string(text: str, indent: str, width: int = 100) -> str:
-    """
-    Return `text` as adjacent string literals, none wider than `width`.
-
-    One character of `width` is left for the comma the caller puts after the
-    last literal, so the emitted C++ stays inside the 100-column style rule.
-    """
+    """Split `text` into literals under `width`, minus one for the caller's comma."""
     room = width - len(indent) - 3
     chunks, rest = [], text
     while len(rest) > room:
@@ -545,7 +516,7 @@ def cxx_pairs(disabled: dict[tuple[str, str], str]) -> str:
 def srdf(disabled: dict[tuple[str, str], str], sources: list[str]) -> str:
     head = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        "<!-- The allowed-collision list of wiki/trajectory_planning.md 4.2.",
+        "<!-- The allowed-collision list of the crane model.",
         "",
         "     Derived once, by scripts/derive_collision_model.py, from:",
     ]
@@ -571,6 +542,67 @@ def srdf(disabled: dict[tuple[str, str], str], sources: list[str]) -> str:
     return "\n".join(head + body + ["</robot>", ""])
 
 
+def yaml_table(
+    fits: dict[str, dict[str, tuple[Primitive, dict]]],
+    disabled: dict[tuple[str, str], str],
+    sources: list[str],
+) -> str:
+    lines = [
+        "# GENERATED by scripts/derive_collision_model.py -- never hand-edited.",
+        "#",
+        "# The fitted collision geometry of the machine and the self pairs not worth",
+        "# checking, both derived from the descriptions under test/description/ and the",
+        "# meshes they name. The C++ library compiles the same table in because it is",
+        "# ROS-free and cannot resolve a package:// mesh URI; Python reads it from here.",
+        "# Both come out of one run of the script, and",
+        "# `test/test_python_collision.py` checks this file against that header.",
+        "#",
+        "# Derived from:",
+    ]
+    lines += [f"#   {entry}" for entry in sources]
+    lines += [
+        "#",
+        "# A capsule lies along its own z: extents are {radius, half length}. A box",
+        "# carries its three half sides. Both are in the frame of their link.",
+        "",
+        "primitives:",
+    ]
+    for tool in sorted(fits):
+        for link in sorted(fits[tool]):
+            shape, source = fits[tool][link]
+            # Capsule 2 extents, box 3; no padding here, unlike the C++ array.
+            extents = ", ".join(f"{value:.6f}" for value in shape.extents + 0.0)
+            lines.append(
+                "  - tool: {}\n"
+                "    link: {}\n"
+                "    shape: {}\n"
+                "    extents_m: [{}]\n"
+                "    origin_m: [{:.6f}, {:.6f}, {:.6f}]\n"
+                "    orientation_xyzw: [{:.9f}, {:.9f}, {:.9f}, {:.9f}]\n"
+                '    source: "{}"\n'
+                "    source_pose: [{:.9f}, {:.9f}, {:.9f}, {:.9f}, {:.9f}, {:.9f}]".format(
+                    tool,
+                    link,
+                    shape.kind,
+                    extents,
+                    *(shape.centre + 0.0),
+                    *(shape.quaternion() + 0.0),
+                    source["signature"],
+                    *(source["origin_xyz"] + 0.0),
+                    *(source["origin_rpy"] + 0.0),
+                )
+            )
+    lines += [
+        "",
+        "# Pairs self-collision does not check, with the derivation's own reason.",
+        "allowed_self_pairs:",
+    ]
+    lines += [
+        f"  - [{a}, {b}]  # {reason}" for (a, b), reason in sorted(disabled.items())
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -579,6 +611,7 @@ def main() -> int:
     parser.add_argument("--package", action="append", default=[], metavar="NAME=DIR")
     parser.add_argument("--samples", type=int, default=20000)
     parser.add_argument("--seed", type=int, default=20260824)
+    parser.add_argument("--write-yaml", type=Path, default=None)
     parser.add_argument("--write-srdf", type=Path, default=None)
     arguments = parser.parse_args()
 
@@ -614,9 +647,8 @@ def main() -> int:
             for second in sorted(shapes)[first_index + 1 :]:
                 carried.setdefault((first, second), set()).add(tool)
 
-    # Disabled only where every tool that carries both links disabled it: an
-    # extra checked pair costs a distance query, a wrongly dropped one is a
-    # collision nobody looks for.
+    # Disabled only where every tool carrying both links disabled it: an extra
+    # checked pair costs a query, a wrongly dropped one hides a collision.
     merged = {}
     for pair, tools in carried.items():
         reasons = {matrices[tool].get(pair) for tool in tools}
@@ -634,6 +666,9 @@ def main() -> int:
             f"{len(matrices[tool])} disabled pairs",
             file=sys.stderr,
         )
+    if arguments.write_yaml is not None:
+        arguments.write_yaml.write_text(yaml_table(fits, merged, sources))
+        print(f"// wrote {arguments.write_yaml}", file=sys.stderr)
     if arguments.write_srdf is not None:
         arguments.write_srdf.write_text(srdf(merged, sources))
         print(f"// wrote {arguments.write_srdf}", file=sys.stderr)

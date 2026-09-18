@@ -8,6 +8,7 @@ from .conventions import (
     Frame,
     Tool,
     canonical_joints,
+    hydraulic_limits,
 )
 from .description import Description, parse
 from .errors import CraneModelError, ErrorCode
@@ -31,5 +32,6 @@ __all__ = [
     "Pose",
     "Tool",
     "canonical_joints",
+    "hydraulic_limits",
     "parse",
 ]

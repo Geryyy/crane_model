@@ -1,10 +1,8 @@
 """
-Numeric crane model on Pinocchio, in canonical coordinates.
+Numeric crane model on Pinocchio: kinematics, passive equilibrium, geometry.
 
-Planning-side counterpart of the C++ library: kinematics, passive equilibrium
-and geometry, no realtime dynamics. Both read the same URDF and the same
-config/hydraulics.yaml, so the two agree by construction rather than by
-discipline.
+Planning-side counterpart of the C++ library, no realtime dynamics. Same URDF
+and config/hydraulics.yaml as the C++ side, so the two cannot drift.
 """
 
 from __future__ import annotations
@@ -27,16 +25,13 @@ from .conventions import (
 from .description import parse
 from .errors import CraneModelError, ErrorCode
 
-# Residual h_u is driven to, in N m. The passive rows carry of order 1e3 N m of
-# gravity terms that cancel at the equilibrium, leaving a noise floor near
-# 1e-13; against a restoring stiffness of 2e3 N m/rad this is under 1e-11 rad.
+# Residual h_u is driven to, in N m. Passive rows carry ~1e3 N m of gravity that
+# cancels, noise floor ~1e-13; against 2e3 N m/rad stiffness that is <1e-11 rad.
 EQUILIBRIUM_RESIDUAL_NM = 1.0e-8
-# A runaway guard, not a working range: Newton from inside the well reaches the
-# residual in single digits of iterations.
+# Runaway guard, not a working range: Newton converges in single-digit iterations.
 EQUILIBRIUM_ITERATIONS = 32
 # Samples per passive axis in the seed search, endpoints included. Five over the
-# pi of tip range puts a sample well inside the quarter turn that separates the
-# hanging well from the saddles either side of it.
+# pi of tip range lands well inside the hanging well, clear of the saddles.
 EQUILIBRIUM_SAMPLES = 5
 
 
@@ -54,7 +49,7 @@ class Pose:
 
 @dataclass(frozen=True)
 class Jacobian:
-    value: np.ndarray  # 6x8, LOCAL frame, contract section 7
+    value: np.ndarray  # 6x8, LOCAL frame
     expressed_in: Frame
 
 
@@ -106,8 +101,7 @@ class CraneModel:
             [self._model.upperPositionLimit[slot.idx_q] for slot in self._passive_slots]
         )
         self._mount = self._payload_mount()
-        # Loaded on the first collision query: kinematics users pay nothing for
-        # the geometry and need no collision table on disk.
+        # Loaded on first collision query: kinematics users pay nothing for it.
         self._collision_config = collision_config
         self._geometry = None
 
@@ -169,23 +163,15 @@ class CraneModel:
         pin.forwardKinematics(
             self._model, self._data, self._description.configuration(q)
         )
-        # The two frames asked for, not all of them: `updateFramePlacements`
-        # refreshes every frame the description carries (130 on the PZS100) and
-        # this is the inner loop of the planner's inverse kinematics. `Model::
-        # pose` in src/model.cpp has always done it this way; this is Python
-        # catching up, not a new decision.
+        # The two frames asked for, not all 130 the PZS100 carries: this is the
+        # inner loop of the planner's IK. `Model::pose` in src/model.cpp likewise.
         pin.updateFramePlacement(self._model, self._data, source)
         pin.updateFramePlacement(self._model, self._data, target)
         relative = self._data.oMf[source].actInv(self._data.oMf[target])
         return Pose(frm, np.array(relative.translation), pin.SE3ToXYZQUAT(relative)[3:])
 
     def jacobian(self, q, frame: Frame) -> Jacobian:
-        """
-        Return the 6x8 LOCAL Jacobian in canonical coordinates.
-
-        Coupled joints are summed into their driving coordinate's column, so the
-        telescope column carries both stages.
-        """
+        """6x8 LOCAL Jacobian; coupled joints sum into the driver's column."""
         q = _finite("q", q, GENERALIZED_DOF)
         full = pin.computeFrameJacobian(
             self._model,
@@ -212,14 +198,13 @@ class CraneModel:
                 ErrorCode.SINGULAR_CONFIGURATION,
                 "the passive gravity torque is not finite at this configuration",
             )
-        # The Hessian of a potential is symmetric; the off-diagonals come out of
-        # different sweeps of the same algorithm, so they are averaged.
+        # The Hessian of a potential is symmetric; the off-diagonals are averaged.
         coupling = 0.5 * (stiffness[0, 1] + stiffness[1, 0])
         stiffness[0, 1] = stiffness[1, 0] = coupling
         return gravity, stiffness, configuration
 
     def _passive_torque(self, configuration: np.ndarray) -> np.ndarray:
-        """Return the passive rows of the inverse dynamics at rest: contract section 7."""
+        """Return the passive rows of the inverse dynamics at rest."""
         zero = np.zeros(self._model.nv)
         pin.rnea(self._model, self._data, configuration, zero, zero)
         residual = (self._description.projection.T @ self._data.tau)[
@@ -236,11 +221,9 @@ class CraneModel:
         """
         Return the passive coordinates at which the tool hangs, for `q_a`.
 
-        A two-hinge pendulum has four critical points on the torus and two are
-        the tool standing *up*; they satisfy h_u = 0 exactly as well. The sign of
-        the stiffness is what separates them, so the seed is chosen only among
-        samples with a positive definite one, and the condition is rechecked at
-        every iterate rather than at the end.
+        Four critical points, two of them tool-*up*, all with h_u = 0: only the
+        sign of the stiffness separates them, so the seed is picked among
+        positive definite samples and rechecked at every iterate.
         """
         q_a = _finite("q_a", q_a, len(ACTUATED_INDICES))
         q = np.zeros(GENERALIZED_DOF)
@@ -309,9 +292,8 @@ class CraneModel:
         """
         Return the worst distance between the machine and `scene`.
 
-        Scene poses are in K0_mounting_base. Self pairs the fit calls not worth
-        checking are excluded; everything else is checked, so a configuration
-        folded back over itself is refused against an empty scene too.
+        Scene poses are in K0_mounting_base. Only the self pairs the fit calls
+        skip are excluded, so a folded pose is refused against an empty scene.
         """
         q = _finite("q", q, GENERALIZED_DOF)
         return _collision_query(
