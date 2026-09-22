@@ -37,7 +37,12 @@ import pinocchio as pin
 import pinocchio.casadi as cpin
 import yaml
 
-from .conventions import Tool, default_actuator_path, default_hydraulics_path
+from .conventions import (
+    Frame,
+    Tool,
+    default_actuator_path,
+    default_hydraulics_path,
+)
 from .description import parse as parse_description
 
 # --- the canonical eight -----------------------------------------------------
@@ -895,6 +900,27 @@ class CraneSymbolicModel:
                 total += weight * data.nle[index]
             bias[row] = total + self.description.damping[row] * dq[row]
         return mass, bias
+
+    def tool_position(self, q):
+        """
+        TCP position in `K0_mounting_base`, as an expression in the canonical eight.
+
+        The tool frame the cost cares about, which no other expression here
+        carries: `z` reports cylinder force and axis flow, and the dynamics need
+        neither. Built on the same `cpin` model and the same `_expand` as
+        `equations`, so a residual written against it and the dynamics cannot
+        disagree about where the machine is.
+
+        Position only. Orientation is a second metric with its own units and the
+        target this exists for -- a centimetre at the tool -- is a length.
+        """
+        model = cpin.Model(self.description.model)
+        data = model.createData()
+        configuration, _ = self._expand(q, ca.SX.zeros(q.shape[0]))
+        cpin.framesForwardKinematics(model, data, configuration)
+        base = data.oMf[model.getFrameId(Frame.MOUNTING_BASE.value)]
+        tool = data.oMf[model.getFrameId(Frame.TCP.value)]
+        return base.actInv(tool).translation
 
     def _expand(self, q, dq):
         """
