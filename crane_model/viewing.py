@@ -36,11 +36,11 @@ def canonical_rows(planned, passive, q_tool: float) -> np.ndarray:
     return rows
 
 
-def _thin(rows: np.ndarray) -> np.ndarray:
-    """At most `MAX_POINTS` rows, both endpoints kept."""
-    if len(rows) <= MAX_POINTS:
+def _thin(rows: np.ndarray, samples: int) -> np.ndarray:
+    """At most `samples` rows, both endpoints kept."""
+    if len(rows) <= samples:
         return rows
-    return rows[np.linspace(0, len(rows) - 1, MAX_POINTS).round().astype(int)]
+    return rows[np.linspace(0, len(rows) - 1, samples).round().astype(int)]
 
 
 class Markers:
@@ -58,9 +58,16 @@ class Markers:
         self._plant = plant
         self._lines: dict[str, tuple] = {}
 
-    def path(self, name: str, q_rows, rgba, width: float) -> None:
-        """Draw the TCP curve of `q_rows` -- canonical eight per row -- as `name`."""
-        rows = _thin(np.atleast_2d(np.asarray(q_rows, dtype=float)))
+    def path(
+        self, name: str, q_rows, rgba, width: float, samples: int = MAX_POINTS
+    ) -> None:
+        """
+        Draw the TCP curve of `q_rows` -- canonical eight per row -- as `name`.
+
+        `samples` is what a curve redrawn every cycle pays: each point is one FK
+        and one capsule, and every `path` call rewrites every line.
+        """
+        rows = _thin(np.atleast_2d(np.asarray(q_rows, dtype=float)), samples)
         self._lines[name] = (
             self._plant.positions_of(TCP_BODY, rows),
             np.asarray(rgba, dtype=np.float32),

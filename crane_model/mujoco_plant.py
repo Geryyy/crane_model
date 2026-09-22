@@ -29,6 +29,10 @@ NX_RIGID = 14
 #: MuJoCo's viewer segfaults on interpreter teardown; `leave` skips it (exit 139).
 _VIEWER_OPENED = False
 
+#: Frames per second fed to the viewer. `_show` costs ~4 ms -- run at the 100 Hz
+#: control tick that is 40% of the wall clock, spent on frames no screen shows.
+_FRAME_RATE = 60.0
+
 _CAMERA = {
     "fovy": 60.0,
     "lookat": (1.5, 0.5, 1.0),
@@ -184,6 +188,7 @@ class MujocoPlant:
         self._scratch = None
         self._realtime = 1.0
         self._deadline = 0.0
+        self._frame = 0.0
         # Frozen, MuJoCo welds each cylinder link in at its neutral offset, which
         # is the URDF origin with an identity rotation. `_pose_cylinders` writes
         # the closed linkage's offset over it; these are what it writes back.
@@ -332,7 +337,7 @@ class MujocoPlant:
             self._viewer.cam.elevation = _CAMERA["elevation"]
             self._viewer.cam.distance = _CAMERA["distance"]
         self._realtime = float(realtime)
-        self._deadline = time.perf_counter()
+        self._deadline = self._frame = time.perf_counter()
         return self._viewer
 
     def _pose_cylinders(self) -> bool:
@@ -393,7 +398,12 @@ class MujocoPlant:
     def _render(self, duration: float) -> None:
         if self._viewer is None or not self._viewer.is_running():
             return
-        self._show()
+        # Capped, not once per call: the caller ticks at the control rate, which
+        # is faster than anything can be looked at and `_show` is not cheap.
+        now = time.perf_counter()
+        if now - self._frame >= 1.0 / _FRAME_RATE:
+            self._frame = now
+            self._show()
         if self._realtime <= 0.0:
             return
         self._deadline += duration / self._realtime
