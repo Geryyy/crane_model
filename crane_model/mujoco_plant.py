@@ -181,6 +181,7 @@ class MujocoPlant:
         self._diverged = 0
         self._residual = 0.0
         self._viewer = None
+        self._scratch = None
         self._realtime = 1.0
         self._deadline = 0.0
         # Frozen, MuJoCo welds each cylinder link in at its neutral offset, which
@@ -246,10 +247,11 @@ class MujocoPlant:
             ]
         )
 
-    def set_state(self, q, dq=None) -> None:
+    def _write(self, data, q, dq=None) -> None:
+        """Place the canonical eight in `data`, mimic followers included."""
         q = np.asarray(q, dtype=float).reshape(GENERALIZED_DOF)
-        self.data.qpos[self._qpos] = q
-        self.data.qvel[self._dof] = (
+        data.qpos[self._qpos] = q
+        data.qvel[self._dof] = (
             0.0 if dq is None else np.asarray(dq, dtype=float).reshape(GENERALIZED_DOF)
         )
         # A mimic is an equality, not an assignment: a stale follower fights it.
@@ -259,11 +261,36 @@ class MujocoPlant:
                 continue
             offset, multiplier = self.model.eq_data[index][:2]
             position, rate = self.model.jnt_qposadr, self.model.jnt_dofadr
-            self.data.qpos[position[follower]] = (
-                offset + multiplier * self.data.qpos[position[driver]]
+            data.qpos[position[follower]] = (
+                offset + multiplier * data.qpos[position[driver]]
             )
-            self.data.qvel[rate[follower]] = multiplier * self.data.qvel[rate[driver]]
+            data.qvel[rate[follower]] = multiplier * data.qvel[rate[driver]]
+
+    def set_state(self, q, dq=None) -> None:
+        self._write(self.data, q, dq)
         self.forward()
+
+    def positions_of(self, body: str, q_rows) -> np.ndarray:
+        """
+        World position of `body` at each canonical-eight row. FK, nothing steps.
+
+        On a scratch MjData: the plant is mid-run and the viewer renders its own.
+        """
+        rows = np.atleast_2d(np.asarray(q_rows, dtype=float))
+        index = self._mj.mj_name2id(self.model, self._mj.mjtObj.mjOBJ_BODY, body)
+        if index < 0:
+            raise CraneModelError(
+                ErrorCode.INVALID_ROBOT_DESCRIPTION,
+                f"the description carries no body '{body}'",
+            )
+        if self._scratch is None:
+            self._scratch = self._mj.MjData(self.model)
+        out = np.empty((len(rows), 3))
+        for slot, row in enumerate(rows):
+            self._write(self._scratch, row)
+            self._mj.mj_kinematics(self.model, self._scratch)
+            out[slot] = self._scratch.xpos[index]
+        return out
 
     def set_rigid_state(self, x, q_tool: float) -> None:
         x = np.asarray(x, dtype=float).reshape(NX_RIGID)
@@ -278,15 +305,27 @@ class MujocoPlant:
 
     # --- viewer --------------------------------------------------------------
 
-    def open_viewer(self, realtime: float = 1.0):
-        """Open the passive viewer. It renders; it never steps. See `leave`."""
+    @property
+    def viewer(self):
+        """The passive viewer while one is open, else None."""
+        return self._viewer
+
+    def open_viewer(self, realtime: float = 1.0, key_callback=None):
+        """
+        Open the passive viewer. It renders; it never steps. See `leave`.
+
+        `key_callback` is handed each key press on the viewer's own thread --
+        it runs there, so it sets a flag and returns, it does not drive anything.
+        """
         import mujoco.viewer
 
         global _VIEWER_OPENED
         _VIEWER_OPENED = True
         # fovy is a model property, so it has to be set before the scene is built.
         self.model.vis.global_.fovy = _CAMERA["fovy"]
-        self._viewer = mujoco.viewer.launch_passive(self.model, self.data)
+        self._viewer = mujoco.viewer.launch_passive(
+            self.model, self.data, key_callback=key_callback
+        )
         with self._viewer.lock():
             self._viewer.cam.lookat[:] = _CAMERA["lookat"]
             self._viewer.cam.azimuth = _CAMERA["azimuth"]
@@ -331,9 +370,17 @@ class MujocoPlant:
             self.model.body_pos[self._welded] = self._neutral[0]
             self.model.body_quat[self._welded] = self._neutral[1]
 
-    def hold_viewer(self) -> None:
+    def hold_viewer(self, until=None) -> bool:
+        """
+        Keep rendering until `until()` fires or the window goes away.
+
+        True means `until` fired and the window is still there; False that it
+        closed, which is the caller's signal to stop feeding it.
+        """
         try:
             while self._viewer is not None and self._viewer.is_running():
+                if until is not None and until():
+                    return True
                 self._show()
                 time.sleep(0.03)
         except KeyboardInterrupt:
@@ -341,6 +388,7 @@ class MujocoPlant:
         if self._viewer is not None:
             self._viewer.close()
             self._viewer = None
+        return False
 
     def _render(self, duration: float) -> None:
         if self._viewer is None or not self._viewer.is_running():

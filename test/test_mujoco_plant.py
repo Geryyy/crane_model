@@ -11,7 +11,7 @@ import numpy as np
 import pinocchio as pin
 import pytest
 from crane_model import CraneModel, Tool
-from crane_model.conventions import ACTUATED_INDICES, PASSIVE_INDICES
+from crane_model.conventions import ACTUATED_INDICES, PASSIVE_INDICES, Frame
 from crane_model.description import parse
 from crane_model.presets import OUTSIDE
 
@@ -208,3 +208,25 @@ def test_drawing_the_cylinders_leaves_the_physics_alone():
     plant.model.body_quat[plant._welded] = plant._neutral[1]
     plant.forward()
     assert np.array_equal(plant.data.qfrc_bias, before)
+
+
+def test_positions_of_is_the_plant_without_disturbing_it():
+    """
+    The overlays' kinematics are the plant's: same bodies, mimics applied.
+
+    A scratch MjData written without the mimic leaves the inner telescope stage
+    behind, which moves the tool by the whole stroke. And the live state has to
+    come back untouched -- the viewer is rendering it while this is called.
+    """
+    plant = MujocoPlant(description(), hydraulics_config=CONFIG)
+    body = Frame.TCP.value
+    index = mujoco.mj_name2id(plant.model, mujoco.mjtObj.mjOBJ_BODY, body)
+    expected = []
+    for q in POSES:
+        plant.set_state(q)
+        expected.append(plant.data.xpos[index].copy())
+
+    plant.set_state(OUTSIDE)
+    actual = plant.positions_of(body, np.vstack(POSES))
+    assert np.allclose(actual, expected, atol=1.0e-12)
+    assert np.array_equal(plant.q, OUTSIDE)
