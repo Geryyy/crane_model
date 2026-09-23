@@ -103,7 +103,12 @@ def to_mujoco_xml(description_xml: str, hydraulics_config: str | None = None) ->
     return _MESH_URI.sub(absolute, xml)
 
 
-_SCENE_XML = """
+#: Ground in K0_mounting_base: the mount sits 1.1407 m above it (world_model.yaml
+#: puts K0 at world z = 1.1407). The scene plane and anything asking "is that
+#: above ground" mean the same surface.
+GROUND_Z = -1.1407
+
+_SCENE_XML = f"""
 <mujoco model='scene'>
   <asset>
     <texture name='sky' type='skybox' builtin='gradient' rgb1='0.5 0.6 0.8'
@@ -115,7 +120,7 @@ _SCENE_XML = """
   <worldbody>
     <light name='sun' pos='0 0 20' dir='0 0.5 -1' directional='true'
            diffuse='1 1 1' ambient='0.5 0.5 0.5'/>
-    <geom name='ground' type='plane' pos='0 0 -1.1407' size='10 10 0.1'
+    <geom name='ground' type='plane' pos='0 0 {GROUND_Z}' size='10 10 0.1'
           material='ground_mat' contype='0' conaffinity='0'/>
   </worldbody>
 </mujoco>
