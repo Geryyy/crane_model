@@ -502,6 +502,19 @@ class MujocoPlant:
         hinge = self.model.jnt_type[joints] == self._mj.mjtJoint.mjJNT_HINGE
         return np.asarray(hinge & (self.model.jnt_limited[joints] == 0))
 
+    def scale_planned_damping(self, factors) -> np.ndarray:
+        """
+        Multiply the five planned axes' joint damping in place; returns the new `d`.
+
+        C3's `d` is not an `ActuatorFit` field -- it is already here, as the
+        description's joint damping -- so a perturbed `k` can only keep its
+        partner by moving this. `k_i` and `d_i` are one identification
+        (`mismatch.perturb_fit`); scaling one alone moves zeta.
+        """
+        scale = np.asarray(factors, dtype=float).reshape(len(PLANNED_INDICES))
+        self.model.dof_damping[self._planned_dof] *= scale
+        return np.asarray(self.model.dof_damping[self._planned_dof]).copy()
+
     def step(self, tau_planned, duration: float) -> np.ndarray:
         """
         Hold a generalized force on the five planned axes for `duration`.

@@ -340,6 +340,7 @@ without a machine, and so nobody writes the numbers down twice.
 | `crane_model/velocity_loop.py` | the JTC's `PidTrajectoryPlugin` law |
 | `config/velocity_loop.yaml` | the shipped gains, and Psi's identified domain |
 | `crane_model/mujoco_plant.py` `main` | the three above over `MujocoPlant`, at 100 Hz |
+| `crane_model/mismatch.py` | how the simulated plant may deviate from the fit the solver keeps, and what it refuses |
 
 `actuator.py` is the same C3 as `symbolic.py`, integrated instead of symbolic —
 `test_actuator.py` pins the two together against each other and against the ARX2
