@@ -363,6 +363,49 @@ gain, and read `wiki/controller_design.md` 4.1 before changing one.
 Psi is not modelled anywhere here. It is an input linearization that exists only
 on the machine, and everything in this package assumes it exact.
 
+### Is the fit still the machine?
+
+`test/step_response_fixture.json` is one measured velocity step per planned
+axis, out of the HydraulicCalib staircases, and `test/test_step_response.py`
+drives C3 at the fixture's own pose and compares. It is the only thing in this
+package that checks a *number* rather than an agreement between two copies of
+one law — `test_actuator.py`'s three forms would go on agreeing with every
+constant wrong, and issue 161 spent two sessions on a plant that reached full
+velocity in 0.2 s where the identification says 0.85 with 150 green tests
+throughout.
+
+Regenerate it when the campaign or the reader changes; the bags are not in the
+repo and nothing in CI can reach them.
+
+```bash
+scripts/derive_step_fixture.py            # --survey lists every bag it would consider
+```
+
+Two things the fixture is not. It is a **shape**: `/setpoints_compensated`
+carries `u_norm` in `[-1, 1]`, not rad/s, so the response is normalised by the
+velocity the axis settled at and the amplitude is gone. And its `m_ii` is the
+*campaign's* description at the recorded pose, not `pzs100.urdf` — a different
+tool, 21-30 % heavier on sw/ha/ka/sa and 3x lighter on ro.
+
+What it says today: the fit reproduces `ro` to 0.09 and `sw`/`ha` to 0.23, is
+0.40 out on `ka`'s rise, and is 0.79 out on `sa`, where the telescope stands
+still for 250 ms — four times the pinned transport delay — before it moves.
+`test_step_response.py`'s tolerance table is that measurement, not a target.
+
+The live half of the same comparison is `crane_mpc/scripts/trials/`, and it
+needs a simulator, so it is a human's to run:
+
+```bash
+scripts/trials/steptest.py  <out.json>        # one open-loop step per axis on a running sim
+scripts/trials/plant_step.py <out.json> [joint]   # Gazebo, MuJoCo and the OCP side by side
+```
+
+`plant_step.py` prints the same normalised numbers this fixture stores, so a
+row that disagrees with the fixture is the simulator disagreeing with the
+machine rather than with the model. `MujocoPlant` under `C3Actuator` is the
+cheap arbiter between those two: it needs no ROS graph and runs in seconds, and
+held next to Gazebo it would have caught issue 161 on day one.
+
 ## Build, test and regenerate
 
 ```bash
