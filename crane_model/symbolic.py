@@ -177,6 +177,11 @@ NBX = X_ACTUATED_FORCE
 U_PROGRESS_ACCEL = NU
 NU_PROGRESS = NU + 1
 
+# C4 (opt-in): the command `c` a state, appended so every offset above holds;
+# `u[:NU]` is then its rate `dc`, and C3 reads `c` where it read `u`.
+X_COMMAND = NX
+NX_COMMAND = NX + K_PLANNED_DOF
+
 # --- the parameter vector -----------------------------------------------------
 # One pinned tool coordinate and one payload body: mass, CoM in K8, the six
 # independent entries of Theta_L. A *symbol*, so an OCP binds it at runtime (072).
@@ -681,17 +686,26 @@ class CraneSymbolicModel:
         constants: Constants | None = None,
         gravity=(0.0, 0.0, -9.81),
         actuator: ActuatorFit | None = None,
+        command_state: bool = False,
     ):
+        if command_state and actuator is None:
+            raise ValueError("command_state (C4) needs the C3 actuator it feeds")
         self.constants = constants if constants is not None else load_constants()
         self.description = parse(description_xml, tool, self.constants, gravity)
         self.tool = tool
         self.actuator = actuator
+        self.command_state = command_state
 
         # --- the symbols -----------------------------------------------------
         # The progress pair rides with the actuator: only the C3 branch has a `u`
         # to spend time with. `actuator=None` leaves `x` and `u` unchanged.
-        self.x = ca.SX.sym("x", NX if actuator is not None else NX_RIGID)
+        nx = NX if actuator is not None else NX_RIGID
+        self.x = ca.SX.sym("x", NX_COMMAND if command_state else nx)
         self.u = ca.SX.sym("u", NU_PROGRESS if actuator is not None else NU)
+        # What C3 is driven by: `u` itself, or under C4 the state `c`.
+        self.command = (
+            self.x[X_COMMAND : X_COMMAND + NU] if command_state else self.u[:NU]
+        )
         self.p = ca.SX.sym("p", NP)
         self.q_tool = self.p[P_TOOL_POSITION]
         self.payload = self.p[P_PAYLOAD_MASS:NP]
@@ -765,13 +779,13 @@ class CraneSymbolicModel:
                 *[
                     self.x[X_COMMAND_LAG + lag_slot[axis]]
                     if axis in lag_slot
-                    else self.u[axis]
+                    else self.command[axis]
                     for axis in K_PLANNED_AXES
                 ]
             )
             self.command_lag_rate = ca.vertcat(
                 *[
-                    (self.u[axis] - self.u_f[axis]) / actuator.tau_v[axis]
+                    (self.command[axis] - self.u_f[axis]) / actuator.tau_v[axis]
                     for axis in K_LAG_AXES
                 ]
             )
@@ -836,6 +850,8 @@ class CraneSymbolicModel:
                 self.progress_accel,
                 self.actuated_force_rate,
             )
+            if command_state:
+                self.xdot = ca.vertcat(self.xdot, self.u[:NU])
 
         self.cylinder_jacobian = ca.vertcat(
             *jacobian_diagonal(self.constants, self.q[1], self.q[2])

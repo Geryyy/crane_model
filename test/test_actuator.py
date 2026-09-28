@@ -12,6 +12,7 @@ import os
 import casadi as ca
 import numpy as np
 import pytest
+
 from crane_model import Tool
 from crane_model.actuator import C3Actuator
 from crane_model.conventions import default_actuator_path
@@ -21,7 +22,9 @@ from crane_model.symbolic import (
     NP,
     NU_PROGRESS,
     NX,
+    NX_COMMAND,
     X_ACTUATED_FORCE,
+    X_COMMAND,
     X_COMMAND_LAG,
     X_PLANNED_VELOCITY,
     CraneSymbolicModel,
@@ -98,6 +101,30 @@ def test_one_step_solves_the_symbolic_blocks(force_rate):
         advanced[X_COMMAND_LAG : X_COMMAND_LAG + len(lag_axes)] = actuator.u_f[lag_axes]
         rate = np.asarray(force_rate(advanced, u, np.zeros(NP))).reshape(-1)
         assert np.allclose((after - tau) / DT, rate, rtol=TOLERANCE, atol=0.0)
+
+
+def test_c4_is_c3_driven_by_the_command_state():
+    """C4 at (x, c = u) is C3 on the shared rows, and its own rows are c' = du."""
+    with open(DESCRIPTION, encoding="utf-8") as handle:
+        xml = handle.read()
+    fit = load_actuator_fit()
+    c3 = CraneSymbolicModel(xml, Tool.PZS100, actuator=fit)
+    c4 = CraneSymbolicModel(xml, Tool.PZS100, actuator=fit, command_state=True)
+    f3 = ca.Function("f3", [c3.x, c3.u, c3.p], [c3.xdot])
+    f4 = ca.Function("f4", [c4.x, c4.u, c4.p], [c4.xdot])
+
+    rng = np.random.default_rng(5)
+    x = rng.normal(size=NX) * 0.3
+    u = rng.normal(size=NU_PROGRESS)
+    du = rng.normal(size=NU_PROGRESS)
+    p = np.zeros(NP)
+    xdot3 = np.asarray(f3(x, u, p)).ravel()
+    x4 = np.concatenate([x, u[:K_PLANNED_DOF]])
+    u4 = np.r_[du[:K_PLANNED_DOF], u[-1]]
+    xdot4 = np.asarray(f4(x4, u4, p)).ravel()
+    assert xdot4.shape == (NX_COMMAND,)
+    assert np.allclose(xdot4[:NX], xdot3, rtol=1e-12, atol=1e-9)
+    assert np.array_equal(xdot4[X_COMMAND:], du[:K_PLANNED_DOF])
 
 
 def lagged(command, tau_v):
