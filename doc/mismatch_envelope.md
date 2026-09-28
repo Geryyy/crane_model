@@ -125,15 +125,15 @@ ranks the axes the same way as the band widths above, with ka and sa widest.
 
 ## What the chain can set
 
-`wire_chain.py` is the faithful chain. Unknown flags go to `sim_chain.arguments`, then
-`mpc_a2b`.
+`wire_chain.py` is the offline chain (the others were retired in crane_mpc issue 181);
+its flags live in `scripts/trials/harness.py`.
 
 | band | flag | notes |
 |---|---|---|
 | k | `--k-scale S S S S S` | must come with `--d-scale`; pass `--d-scale 1 1 1 1 1` for k alone |
 | d | `--d-scale S S S S S` (+ `--k-scale 1 1 1 1 1`) | scales MuJoCo `dof_damping`, one constant per axis |
 | Psi gain | `--psi-gain-positive G*5`, `--psi-gain-negative G*5` | `PsiGain.apply`, per sign of u (`u >= 0` is positive) |
-| dead time | `--dead-time D` | in wire_chain this is **plant only**: the predictor is `Cycle(..., sensor_to_valve_delay)`. It must be a multiple of `--timestep` (0.5 ms). In `sim_chain` it moves the predictor too, so it is not a mismatch there |
+| dead time | `--dead-time D` | in wire_chain this is **plant only**: the predictor is `Cycle(..., sensor_to_valve_delay)`. It must be a multiple of `--timestep` (0.5 ms). |
 | payload | `--payload-mass M --payload-com 0 0 1` (OCP), `--plant-payload M` (MuJoCo) | `--plant-payload` and `carry_payload` are in crane_mpc's working tree, **uncommitted** (another session's work) |
 | latency | `--latency L` (wire_chain) | constant delivery delay; the solve budget is off (10 s) |
 | PI | `--pi-scale s` (wire_chain) | lever, not a band |
@@ -148,17 +148,12 @@ ranks the axes the same way as the band widths above, with ka and sa widest.
 2. **Late-cycle tail.** `--latency` is one constant and the budget is off, so the 3-5 % dropped
    or shifted cycles are not drawn. `/joint_states` age is not separate from delivery, because
    wire_chain measures exactly at the tick. Fold it into `--latency` (+10 ms) at most.
-3. **`--apply-delay` does nothing in wire_chain.** Only `Chain.advance` (sim_chain) reads it.
-   Use `--latency`.
 4. **Direction-dependent `k`** (boom 20 % softer lowering) and **pose-dependent `d`** (the ha
    light-pose bags) are out of reach, because `k`/`d` are one scalar per axis.
 5. **Unmodelled structure:** the sa load-holding-valve breakaway (~250 ms, a stiction block
    rather than a delay), telescope wear-pad Coulomb friction, and slew's second mode (1.1 vs
    1.38 Hz, the pendulum through the bearing).
-6. **Payload estimate error and CoM offset:** no data, corners only. Plant payload is
-   uncommitted (see above).
-7. **`sweep_mismatch.py` drives `sim_chain`, not wire_chain.** Its bands are also symmetric
-   scalars broadcast to every axis (`--k-band` moves `d` by the same factor, `--psi-band` is
-   the same on both signs). The per-axis, asymmetric corners above need either a
-   wire_chain-driven sweeper or explicit per-axis flags.
+6. **Payload estimate error and CoM offset:** no data, corners only.
+7. **Per-axis corners** are supported by `sweep_robust.py` (`--band name=[lo x5],[hi x5]`);
+   direction-asymmetric Psi gains are not (one value for both signs per axis).
 8. **Hardware timing:** no machine latency or clock offset. The timing rows are Gazebo numbers.

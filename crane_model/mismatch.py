@@ -1,7 +1,7 @@
 """
 The plant-side deviations the harness can be given, and the ones it refuses.
 
-`sim_chain.py` drives MuJoCo through the same C3 fit the exported OCP carries,
+crane_mpc's `trials/wire_chain.py` drives MuJoCo through the same C3 fit the exported OCP carries,
 so with nothing set here every number it produces is a nominal-plant number --
 the MPC measured against its own model. This module is the other side: a Psi
 gain error and a perturbed fit, applied to the *simulated machine* while the
