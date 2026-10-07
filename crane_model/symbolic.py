@@ -568,7 +568,6 @@ class CoupledJoint:
     Multiplier and offset are read out of the description, not assumed.
     """
 
-    name: str
     slot: JointSlot
     source: int
     multiplier: float
@@ -635,7 +634,6 @@ def parse(
         for drive in drives[1:]:
             out.coupled.append(
                 CoupledJoint(
-                    name="",
                     slot=JointSlot(
                         drive.slot.idx_q, drive.slot.idx_v, drive.slot.nq == 2
                     ),
@@ -1032,81 +1030,3 @@ class CraneSymbolicModel:
                 for axis in range(K_ACTUATED_DOF)
             ]
         )
-
-    def functions(self, prefix: str) -> list:
-        """
-        Wrap the model as `casadi.Function`s, named `<prefix>_<what>`.
-
-        One evaluation carries dynamics, reduction and output map together: one
-        graph, and splitting it would put three copies of `crba` in the generated
-        C. The small maps are separate so each can be asserted on its own.
-        """
-        q = ca.SX.sym("q", K_GENERALIZED_DOF)
-        dq = ca.SX.sym("dq", K_GENERALIZED_DOF)
-        p_a = ca.SX.sym("p_a", K_ACTUATED_DOF)
-        p_b = ca.SX.sym("p_b", K_ACTUATED_DOF)
-
-        out = [
-            ca.Function(
-                f"{prefix}_evaluate",
-                [self.x, self.u, self.p],
-                [
-                    ca.densify(self.xdot),
-                    ca.densify(self.z),
-                    ca.densify(self.mass),
-                    ca.densify(self.bias),
-                    ca.densify(self.mass_uu),
-                    ca.densify(self.mass_ua),
-                    ca.densify(self.bias_u),
-                ],
-                ["x", "u", "p"],
-                ["xdot", "z", "mass", "bias", "mass_uu", "mass_ua", "bias_u"],
-            ),
-            ca.Function(
-                f"{prefix}_cylinder_jacobian",
-                [q],
-                [
-                    ca.densify(
-                        ca.vertcat(*jacobian_diagonal(self.constants, q[1], q[2]))
-                    )
-                ],
-                ["q"],
-                ["j_cyl"],
-            ),
-            ca.Function(
-                f"{prefix}_chamber_force",
-                [p_a, p_b],
-                [ca.densify(self.chamber_force(p_a, p_b))],
-                ["p_a", "p_b"],
-                ["f_cyl"],
-            ),
-            ca.Function(
-                f"{prefix}_damping",
-                [dq],
-                [ca.densify(ca.vertcat(*self.description.damping) * dq)],
-                ["dq"],
-                ["d_dq"],
-            ),
-        ]
-
-        # One function per `<mimic>`, named after the joint it reconstructs. An
-        # export that forgets one gets a half-length telescope -- a plausible mass
-        # matrix, not a missing symbol. The name makes the absence a link error.
-        for coupled in self.description.coupled:
-            out.append(
-                ca.Function(
-                    f"{prefix}_mimic_{coupled.name}",
-                    [q, dq],
-                    [
-                        ca.densify(
-                            ca.vertcat(
-                                coupled.multiplier * q[coupled.source] + coupled.offset,
-                                coupled.multiplier * dq[coupled.source],
-                            )
-                        )
-                    ],
-                    ["q", "dq"],
-                    ["mimic"],
-                )
-            )
-        return out
