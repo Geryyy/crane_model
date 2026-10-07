@@ -35,12 +35,16 @@ gains:
     u_clamp_min: -0.9635
     u_clamp_max: 0.9357
   theta2_boom_joint:
+    # Only axis with two Psi fits, and they disagree in both directions
+    # (wiki/hydraulics.md 6.2/6.3): 1-D fallback [-0.3134,+0.2977], 2-D surface
+    # [-0.3323,+0.2880]. Hardware runs the 2-D one. Clamp is the intersection --
+    # extrapolates neither fit. Do not widen to the 2-D row without the shipped fit.
     ff_velocity_scale: 1.0
     p: 1.30
     i: 0.0
     d: 0.0945
-    u_clamp_min: -0.3134
-    u_clamp_max: 0.2977
+    u_clamp_min: -0.3134   # 1-D fallback, tighter here
+    u_clamp_max: 0.2880    # 2-D surface, tighter here
   theta3_arm_joint:
     ff_velocity_scale: 1.0
     p: 1.00

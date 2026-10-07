@@ -73,6 +73,33 @@ def test_mirrors_ros2_control():
         )
 
 
+#: wiki/hydraulics.md 6.2, Psi's identified domain, as the wiki rounds it. The boom
+#: is absent: it is the one axis with two fits, see below.
+IDENTIFIED_DOMAIN = {
+    "theta1_slewing_joint": (-0.9635, 0.9357),
+    "q4_big_telescope": (-0.5551, 0.5849),
+    "theta8_rotator_joint": (-2.397, 2.464),
+}
+
+
+def test_the_clamp_is_the_identified_domain():
+    """Oracle 3: the clamp is Psi's own domain, not a tuning knob. Pinned because
+    the boom's two fits disagree in both directions and the shipped clamp used to
+    be the 1-D fallback while hardware runs the 2-D surface."""
+    ours, _ = load_velocity_loop()
+    for joint, (low, high) in IDENTIFIED_DOMAIN.items():
+        # 5e-4: the wiki prints the rotator to four digits, the yaml to five.
+        assert ours[joint].u_clamp_min == pytest.approx(low, abs=5e-4)
+        assert ours[joint].u_clamp_max == pytest.approx(high, abs=5e-4)
+
+    # Boom: the intersection of the 1-D fallback [-0.3134,+0.2977] and the 2-D
+    # surface [-0.3323,+0.2880], so it extrapolates neither fit. Widening either
+    # end needs the shipped fit, which is no longer in the tree.
+    boom = ours["theta2_boom_joint"]
+    assert boom.u_clamp_min == pytest.approx(-0.3134)
+    assert boom.u_clamp_max == pytest.approx(0.2880)
+
+
 def test_the_clamp_bounds_the_pi_branch_alone():
     """The documented deviation from wiki/control_architecture.md 2.1, pinned: a
     saturated PI plus the feedforward overshoots `u_clamp_max` by exactly the
