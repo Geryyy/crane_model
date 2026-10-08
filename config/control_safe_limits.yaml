@@ -94,8 +94,12 @@ dq_a_max:
 
 # Marc's `joint_limit.safety_thresh`, as a tightening of the position rows and
 # not the point a penalty starts biting: dq_a_max times the 60 ms transport dead
-# time, the travel an axis cannot react within. The box both packages enforce is
-# q_a_lower + q_a_margin .. q_a_upper - q_a_margin.
+# time, the travel an axis cannot react within -- at the *pre-128* dq_a_max, see
+# below. `crane_mpc` enforces q_a_lower + q_a_margin .. q_a_upper - q_a_margin;
+# `crane_planning` retreats *two* margins from 231, because `position_box` is
+# max(upper, measured) and a plan allowed onto the MPC's bound leaves its first
+# interval no interior (see PLAN_MARGINS there, which also records what that retreat
+# does not cover: a parked axis, and the measurement latency on top of the dead time).
 # Kept at the **pre-128** dq_a_max and deliberately not recomputed: on the four
 # axes 128 narrowed the product is now smaller, and a smaller margin widens the
 # effective box, which 128 forbids.
@@ -117,14 +121,35 @@ derived:
     the domain (0.3059 against 0.325733); the other four are bound by dq_a_max"
 
 known_gaps:
+  arm_start_pose: "**the sim's default start pose begins outside `q_a_upper.arm`.**
+    `initial_pose:=1` (epsilon_crane_description's `initialization_horizontal.yaml`)
+    sets `theta3_0 = 1.5708`, 0.246 rad above 1.324864 -- mechanically fine (its own
+    `length_arm_cylinder_piston_in_barrel_linear_joint` is 2.1494 m of s_max 2.172,
+    and 0.189 rad below the arm singularity `initialization_zero_feasible.yaml`
+    tabulates at 1.759366), but outside what the controllers may hold. 226 measured
+    the arm 0.24-0.41 rad over this row on all 45 dumped live ticks and a quarter of
+    `crane_mpc` cycles refusing. 231 checked this row rather than that pose: it is
+    sourced to `marc_hpp`/`marc_yaml`, and the four `control_recordings/` bags never
+    bring the arm past 0.553 rad, so nothing measured contradicts it -- the legacy
+    timber planners already refuse `initial_pose:=1` for the same reason.
+    `crane_planning` now refuses a start past this row instead of relaxing to it, so
+    with `initial_pose:=1` it refuses the first move. `initial_pose:=2`
+    (`initialization_outside.yaml`: arm 0.5236, boom 0.5236, telescope 0.25) is
+    inside every row -- it is already `crane_model.presets.OUTSIDE`, so every offline
+    tuning run starts control-safe while the sim launch does not. Moving the sim
+    default there is `blockpose`'s and
+    `concrete_block_behavior_tree`'s, and costs a camera-transform recalibration
+    (`transforms_pzs100_initial_pose_1.yaml`). Worth an issue"
   tool_row: "**the tool rows above do not describe this tool.** Marc's row 5 is an
     angle on a [0, 3] joint -- a retired jaw gripper -- while the PZS100 carries a
     rail travelling 0.0..0.538 m, so 0.2 and 0.7 are wrong in both directions and
     128 declined to narrow a number it could not attribute. crane_planning
     therefore does **not** intersect its tool range with this row and keeps the
-    description's; crane_mpc still enforces it, so a tool pose below 0.23 m is
-    still a reference constraint 1 refuses. Correcting the MPC's row widens its
-    box and is its own change"
+    description's. **Nor does crane_mpc** -- corrected by 231: `position_box`
+    slices `[:K_PLANNED_DOF]` and that is 5, so the tool row stops at the rotator
+    and q8 enters the problem as a parameter (`pin_tool`), not as a boxed state.
+    Nothing anywhere boxes the tool coordinate; the earlier note here claimed
+    constraint 1 refuses a tool pose below 0.23 m and it does not"
   engagement_band: "there is no `position_box` equivalent on the velocity rows.
     Between the two sides of Marc's asymmetric box -- boom 0.239..0.326 rad/s
     lowering, telescope 0.400..0.630 m/s retracting -- the machine may legally be
