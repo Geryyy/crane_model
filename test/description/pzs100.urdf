@@ -748,7 +748,7 @@
          ~/Documents/2025-12-17_pzs, /joint_states theta6_tip_joint, amplitude
          0.44 down to 0.12 rad. The envelope needs both terms: Coulomb alone or
          viscous alone fits 2.3x worse. Was friction 10, damping 15, tuned
-         2024-10-30. theta7_tilt is unchanged, no bag excites it. -->
+         2024-10-30. theta7_tilt copies these, issue 224. -->
     <dynamics damping="12.2" friction="9.3"/>
   </joint>
   <joint name="theta7_tilt_joint" type="revolute">
@@ -757,8 +757,13 @@
     <parent link="K6_double_joint_link"/>
     <child link="moved_with_q7"/>
     <axis xyz="0 0 1"/>
-    <!-- tuned on 2024-10-30 -->
-    <dynamics damping="20" friction="5"/>
+    <!-- Assumed equal to theta6_tip, user decision 2026-10-08 (issue 224). The
+         three pzs_pendulum_theta7_* bags of ~/Documents/2025-12-17_pzs do excite
+         the tilt, but in /joint_states that motion sits on the theta6_tip_joint
+         channel in every bag, so the tilt takes the tip's measured numbers from
+         issue 222. Was friction 5, damping 20, tuned 2024-10-30. Still no
+         direct tilt measurement behind these. -->
+    <dynamics damping="12.2" friction="9.3"/>
   </joint>
   <joint name="theta8_rotator_joint" type="continuous">
     <limit effort="2200" velocity="2.122"/>
