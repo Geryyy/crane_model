@@ -42,6 +42,7 @@ class Description:
     names: tuple[str, ...]
     drives: tuple[tuple[Drive, ...], ...]
     damping: tuple[float, ...]
+    friction: tuple[float, ...]
     projection: np.ndarray = field(init=False)
 
     def __post_init__(self) -> None:
@@ -118,12 +119,16 @@ def parse(
             )
         )
 
-    damping = {
-        joint.get("name"): float(joint.find("dynamics").get("damping"))
-        for joint in tree.iter("joint")
-        if joint.find("dynamics") is not None
-        and joint.find("dynamics").get("damping") is not None
-    }
+    def dynamics(attribute: str) -> dict:
+        return {
+            joint.get("name"): float(joint.find("dynamics").get(attribute))
+            for joint in tree.iter("joint")
+            if joint.find("dynamics") is not None
+            and joint.find("dynamics").get(attribute) is not None
+        }
+
+    damping = dynamics("damping")
+    friction = dynamics("friction")
 
     return Description(
         tool=tool,
@@ -132,4 +137,5 @@ def parse(
         names=tuple(names),
         drives=tuple(tuple(entry) for entry in drives),
         damping=tuple(damping.get(name, 0.0) for name in names),
+        friction=tuple(friction.get(name, 0.0) for name in names),
     )

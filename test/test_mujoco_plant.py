@@ -122,11 +122,13 @@ def test_the_telescope_reflects_the_inertia_of_both_stages(plant):
     assert actual[TELESCOPE, TELESCOPE] == expected[TELESCOPE, TELESCOPE]
     assert np.allclose(actual, expected, rtol=1.0e-5, atol=1.0e-3)
     # The number itself, so a mass edit that quietly halves it fails here too.
-    assert actual[TELESCOPE, TELESCOPE] == pytest.approx(2191.5, rel=1.0e-4)
+    # 2191.5 before issue 222 fitted the PZS100 CoM: 356 kg instead of 350 and
+    # 0.175 m deeper buys the telescope 1.1 %.
+    assert actual[TELESCOPE, TELESCOPE] == pytest.approx(2215.5, rel=1.0e-4)
     # ... and it is the projection that earns it, not the driver's own column.
     driver = model.model.joints[model.model.getJointId("q4_big_telescope")].idx_v
     assert actual[TELESCOPE, TELESCOPE] == pytest.approx(
-        3.403 * mass[driver, driver], rel=1.0e-3
+        3.408 * mass[driver, driver], rel=1.0e-3
     )
 
 

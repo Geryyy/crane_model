@@ -744,8 +744,12 @@
     <parent link="K5_inner_telescope"/>
     <child link="moved_with_q6"/>
     <axis xyz="0 0 1"/>
-    <!-- tuned on 2024-10-30 -->
-    <dynamics damping="15" friction="10"/>
+    <!-- Measured, not tuned: five free ring-downs on the real PZS100,
+         ~/Documents/2025-12-17_pzs, /joint_states theta6_tip_joint, amplitude
+         0.44 down to 0.12 rad. The envelope needs both terms: Coulomb alone or
+         viscous alone fits 2.3x worse. Was friction 10, damping 15, tuned
+         2024-10-30. theta7_tilt is unchanged, no bag excites it. -->
+    <dynamics damping="12.2" friction="9.3"/>
   </joint>
   <joint name="theta7_tilt_joint" type="revolute">
     <origin rpy="0 0 0" xyz="0 0 0"/>
@@ -773,11 +777,26 @@
     <parent link="K8_rotator_lower_part"/>
     <child link="K8_tool_center_point"/>
   </joint>
+  <!-- Gripper mass: 356 kg weighed (user, 2026-10-08), frame + both rails, no
+       rotator. Split 156 kg here + 2 x 100 kg rails (K10/K12 keep the drawing's
+       mass, so the opening width still moves it).
+
+       The CoM z is FITTED, not drawn: free-pendulum ring-downs on the real PZS,
+       ~/Documents/2025-12-17_pzs (5 bags, /joint_states theta6_tip_joint), give a
+       tip period of 2.268 s closed and 2.451 s open. That puts the whole
+       gripper's CoM 1.035 m below the rotator axis, 0.175 m deeper than the
+       drawn z of -0.2, so z becomes +0.2102 (0.015 m, bag-to-bag spread).
+       Only this link carries the correction, and its inertial stands for
+       everything that is not a rail (frame, gripper cylinders, pads, coupler,
+       hoses), which is why the CoM sits below frame.stl.
+       The inertia is NOT fitted: the drawn 0.352 x 0.494 x 0.360 m box, scaled
+       from 150 to 156 kg. The gripper's own I_cm is ~4 % of the tip-axis
+       inertia, so these bags cannot constrain it. -->
   <link name="K8_tool_center_point">
     <inertial>
-      <origin rpy="0 0 0" xyz=" 0. 0. -0.2"/>
-      <mass value="150."/>
-      <inertia ixx="4.67" ixy="-0.0" ixz="-0.0" iyy="3.176" iyz="-0.0" izz="4.6"/>
+      <origin rpy="0 0 0" xyz="0. 0. 0.2102"/>
+      <mass value="156."/>
+      <inertia ixx="4.858446" ixy="0.0" ixz="0.0" iyy="3.302961" iyz="0.0" izz="4.784315"/>
     </inertial>
     <visual>
       <material name="black"/>

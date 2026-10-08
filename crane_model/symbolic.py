@@ -59,6 +59,13 @@ K_PASSIVE_ROWS = (4, 5)
 # The tool's slot among the actuated six, i.e. `cylinder::kToolAxis`.
 K_TOOL_AXIS = 5
 
+# Coulomb friction is `F_C tanh(dq / eps)` -- a sign, smoothed so the OCP can
+# differentiate it. eps is the rate at which the sway counts as settled
+# (`sway.dq_u_settled`), so the term is already full strength wherever the
+# planner still calls the tool moving. Below it the collocation Newton has to
+# cross the step: `predictor_sim` needs `newton_iter >= 12` (issue 214).
+COULOMB_SMOOTHING_RAD_S = 0.02
+
 # --- what the OCPs plan, after issue 068 --------------------------------------
 # The actuated six minus the tool. `K_PLANNED_ROWS` is canonical indices,
 # `K_PLANNED_AXES` actuated: transmission/output map per *axis*, M per *coordinate*.
@@ -589,6 +596,7 @@ class Description:
     # -- how the telescope's second stage and the mirrored rail get their inertia.
     drives: list = field(default_factory=list)
     damping: list = field(default_factory=list)
+    friction: list = field(default_factory=list)
     mount_joint: int = 0
     mount_placement: pin.SE3 = None
 
@@ -647,6 +655,7 @@ def parse(
         for drives in shared.drives
     ]
     out.damping = list(shared.damping)
+    out.friction = list(shared.friction)
 
     # Except where `config/hydraulics.yaml` says otherwise. A table naming a
     # non-canonical joint is a failure, not a line that quietly does nothing.
@@ -912,7 +921,12 @@ class CraneSymbolicModel:
             total = ca.SX.zeros()
             for index, weight in drives[row]:
                 total += weight * data.nle[index]
-            bias[row] = total + self.description.damping[row] * dq[row]
+            bias[row] = (
+                total
+                + self.description.damping[row] * dq[row]
+                + self.description.friction[row]
+                * ca.tanh(dq[row] / COULOMB_SMOOTHING_RAD_S)
+            )
         return mass, bias
 
     def tool_position(self, q):
