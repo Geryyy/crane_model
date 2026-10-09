@@ -12,17 +12,16 @@ import os
 import casadi as ca
 import numpy as np
 import pytest
-
 from crane_model import Tool
 from crane_model.actuator import C3Actuator
 from crane_model.conventions import default_actuator_path
 from crane_model.symbolic import (
-    K_LAG_AXES,
-    K_PLANNED_DOF,
+    LAG_AXES,
     NP,
     NU_PROGRESS,
     NX,
     NX_COMMAND,
+    PLANNED_DOF,
     X_ACTUATED_FORCE,
     X_COMMAND,
     X_COMMAND_LAG,
@@ -67,8 +66,8 @@ def test_one_step_solves_the_symbolic_blocks(force_rate):
     within the sample, not a simultaneous sweep."""
     fit = load_actuator_fit()
     actuator = C3Actuator(DT, fit, dead_time_s=0.0)
-    slot = {axis: index for index, axis in enumerate(K_LAG_AXES)}
-    lag_axes = list(K_LAG_AXES)
+    slot = {axis: index for index, axis in enumerate(LAG_AXES)}
+    lag_axes = list(LAG_AXES)
     rng = np.random.default_rng(11)
 
     for _ in range(5):
@@ -78,14 +77,14 @@ def test_one_step_solves_the_symbolic_blocks(force_rate):
         u_f = np.array(
             [
                 x[X_COMMAND_LAG + slot[axis]] if axis in slot else u[axis]
-                for axis in range(K_PLANNED_DOF)
+                for axis in range(PLANNED_DOF)
             ]
         )
-        dq = x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF]
-        tau = x[X_ACTUATED_FORCE : X_ACTUATED_FORCE + K_PLANNED_DOF]
+        dq = x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + PLANNED_DOF]
+        tau = x[X_ACTUATED_FORCE : X_ACTUATED_FORCE + PLANNED_DOF]
 
         actuator.reset(tau=tau, u=u_f)
-        after = actuator.step(u[:K_PLANNED_DOF], dq)
+        after = actuator.step(u[:PLANNED_DOF], dq)
 
         # Block 2 is the ZOH solution of the very ODE symbolic.py states as
         # `command_lag_rate = (u - u_f)/tau_v`: the same law, solved exactly
@@ -119,12 +118,12 @@ def test_c4_is_c3_driven_by_the_command_state():
     du = rng.normal(size=NU_PROGRESS)
     p = np.zeros(NP)
     xdot3 = np.asarray(f3(x, u, p)).ravel()
-    x4 = np.concatenate([x, u[:K_PLANNED_DOF]])
-    u4 = np.r_[du[:K_PLANNED_DOF], u[-1]]
+    x4 = np.concatenate([x, u[:PLANNED_DOF]])
+    u4 = np.r_[du[:PLANNED_DOF], u[-1]]
     xdot4 = np.asarray(f4(x4, u4, p)).ravel()
     assert xdot4.shape == (NX_COMMAND,)
     assert np.allclose(xdot4[:NX], xdot3, rtol=1e-12, atol=1e-9)
-    assert np.array_equal(xdot4[X_COMMAND:], du[:K_PLANNED_DOF])
+    assert np.array_equal(xdot4[X_COMMAND:], du[:PLANNED_DOF])
 
 
 def lagged(command, tau_v):
@@ -168,7 +167,7 @@ def test_one_axis_reproduces_the_cascade_the_fit_was_scored_with():
     )
 
     # One axis alone: the full five-vector, zero elsewhere, row 3 read back.
-    drive, measured = np.zeros(K_PLANNED_DOF), np.zeros(K_PLANNED_DOF)
+    drive, measured = np.zeros(PLANNED_DOF), np.zeros(PLANNED_DOF)
     achieved = np.zeros_like(command)
     for sample in range(len(command) - 1):
         drive[TELESCOPE] = command[sample]

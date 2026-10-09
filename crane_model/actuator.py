@@ -45,7 +45,7 @@ from __future__ import annotations
 import numpy as np
 
 from .errors import CraneModelError, ErrorCode
-from .symbolic import K_ACTUATOR_FIT, K_PLANNED_DOF, ActuatorFit
+from .symbolic import ACTUATOR_FIT, PLANNED_DOF, ActuatorFit
 
 
 class C3Actuator:
@@ -58,7 +58,7 @@ class C3Actuator:
         dead_time_s: float | None = None,
         tau_max=None,
     ) -> None:
-        self.fit = fit if fit is not None else K_ACTUATOR_FIT
+        self.fit = fit if fit is not None else ACTUATOR_FIT
         self.timestep = float(timestep)
         if not (self.timestep > 0.0):
             raise CraneModelError(
@@ -94,7 +94,7 @@ class C3Actuator:
         self._tau_max = (
             None
             if tau_max is None
-            else np.abs(np.asarray(tau_max, dtype=float)).reshape(K_PLANNED_DOF)
+            else np.abs(np.asarray(tau_max, dtype=float)).reshape(PLANNED_DOF)
         )
         if self._tau_max is not None and not np.all(self._tau_max > 0.0):
             raise CraneModelError(
@@ -114,12 +114,12 @@ class C3Actuator:
         from a consistent state, and a consistent state is the only kind this
         can build. Reach past it into `_queue` and that stops being true.
         """
-        self.tau = np.zeros(K_PLANNED_DOF) if tau is None else self._vector(tau, "tau")
-        self.u_f = np.zeros(K_PLANNED_DOF) if u is None else self._vector(u, "u")
+        self.tau = np.zeros(PLANNED_DOF) if tau is None else self._vector(tau, "tau")
+        self.u_f = np.zeros(PLANNED_DOF) if u is None else self._vector(u, "u")
         self._queue = [self.u_f.copy() for _ in range(self._n_delay)]
 
     def _vector(self, value, name: str) -> np.ndarray:
-        vector = np.asarray(value, dtype=float).reshape(K_PLANNED_DOF)
+        vector = np.asarray(value, dtype=float).reshape(PLANNED_DOF)
         if not np.all(np.isfinite(vector)):
             raise CraneModelError(
                 ErrorCode.NON_FINITE_INPUT, f"{name} carries a non-finite entry"

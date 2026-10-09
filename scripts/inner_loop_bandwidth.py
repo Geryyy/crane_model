@@ -35,7 +35,7 @@ PKG = os.path.dirname(HERE)
 DESCRIPTION = os.path.join(PKG, "test", "description", "pzs100.urdf")
 
 DT_PI = 0.01
-THETA = cs.K_ACTUATOR_FIT.dead_time_s + 0.5 * DT_PI
+THETA = cs.ACTUATOR_FIT.dead_time_s + 0.5 * DT_PI
 PM_MIN, GM_MIN = 45.0, 6.0
 NAMES = ("slew", "boom", "arm", "telescope", "rotator")
 # design load: "a concrete block of some 700-800 kg" (ledger 07, issue 067-080);
@@ -48,8 +48,8 @@ W = np.logspace(-2, 2.5, 6000)
 def build():
     with open(DESCRIPTION, encoding="utf-8") as handle:
         model = cs.CraneSymbolicModel(handle.read(), Tool.PZS100)
-    jac_x = ca.jacobian(model.bias, model.x)
-    return ca.Function("mhk", [model.x, model.p], [model.mass, model.bias, jac_x])
+    jac_x = ca.jacobian(model.h_damped, model.x)
+    return ca.Function("mhk", [model.x, model.p], [model.mass, model.h_damped, jac_x])
 
 
 def params(mass):
@@ -62,12 +62,12 @@ def params(mass):
 
 def state(q_a, q_u):
     x = np.zeros(cs.NX_RIGID)
-    x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF] = q_a
-    x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = q_u
+    x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.PLANNED_DOF] = q_a
+    x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF] = q_u
     return x
 
 
-PASSIVE = list(cs.K_PASSIVE_ROWS)
+PASSIVE = list(cs.PASSIVE_INDICES)
 PQ = [cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + 1]
 
 
@@ -101,9 +101,9 @@ def body(f, q_a, p, axis):
         q_u = equilibrium(f, q_a, p)
         _CACHE[key] = tuple(np.array(v) for v in f(state(q_a, q_u), p))
     m, _, jx = _CACHE[key]
-    rows = [cs.K_PLANNED_ROWS[axis]] + PASSIVE
+    rows = [cs.PLANNED_INDICES[axis]] + PASSIVE
     qcols = [cs.X_PLANNED_POSITION + axis] + PQ
-    dcols = [c + cs.K_PLANNED_DOF + cs.K_PASSIVE_DOF for c in qcols]
+    dcols = [c + cs.PLANNED_DOF + cs.PASSIVE_DOF for c in qcols]
     mm, kk, dd = m[np.ix_(rows, rows)], jx[np.ix_(rows, qcols)], jx[np.ix_(rows, dcols)]
     sway = np.sqrt(
         np.sort(np.linalg.eigvals(np.linalg.solve(mm[1:, 1:], kk[1:, 1:])).real)
@@ -117,7 +117,7 @@ def locked(mm, dd, kk):
 
 def response(axis, mm, dd, kk, p_gain, d_gain, w=W):
     """Loop gain L(jw) = C * delay * PT1 * H, H: u_f -> q_i."""
-    k, tau_v = cs.K_ACTUATOR_FIT.k[axis], cs.K_ACTUATOR_FIT.tau_v[axis]
+    k, tau_v = cs.ACTUATOR_FIT.k[axis], cs.ACTUATOR_FIT.tau_v[axis]
     s = 1j * w
     e0 = np.zeros(len(mm))
     e0[0] = 1.0
@@ -151,7 +151,7 @@ def pade(theta, n=8):
 
 def stable(axis, mm, dd, kk, p_gain, d_gain):
     """Closed-loop eigenvalues on Pade(8): [pade | u_f? | tau | r | dr]."""
-    k, tau_v = cs.K_ACTUATOR_FIT.k[axis], cs.K_ACTUATOR_FIT.tau_v[axis]
+    k, tau_v = cs.ACTUATOR_FIT.k[axis], cs.ACTUATOR_FIT.tau_v[axis]
     ap, bp, cp, dp = pade(THETA)
     nr, npd = len(mm), len(ap)
     lag = tau_v > 0
@@ -260,7 +260,7 @@ def main():
     poses = grid(None)
     rows, ach = [], []
     for axis, name in enumerate(NAMES):
-        g = gains[joints[cs.K_PLANNED_ROWS[axis]]]
+        g = gains[joints[cs.PLANNED_INDICES[axis]]]
         for tag, mass in PAYLOADS:
             all_free = []
             p = params(mass)
@@ -327,7 +327,7 @@ def write(path, rows, ach, gains, joints):
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, tag, which, q_a, m, m_free, sway, lk, fr in rows:
-        g = gains[joints[cs.K_PLANNED_ROWS[NAMES.index(name)]]]
+        g = gains[joints[cs.PLANNED_INDICES[NAMES.index(name)]]]
         pose = which + " (" + ",".join(f"{v:.2f}" for v in q_a[1:]) + ")"
         cells = [
             name,

@@ -53,7 +53,7 @@ from pathlib import Path
 
 import numpy as np
 
-#: The five planned axes, `symbolic.K_AXIS_KEYS`. `gr` is in the fit file but
+#: The five planned axes, `symbolic.AXIS_KEYS`. `gr` is in the fit file but
 #: not planned, and its Psi record predates the PZS100 rail anyway.
 AXES = ("sw", "ha", "ka", "sa", "ro")
 

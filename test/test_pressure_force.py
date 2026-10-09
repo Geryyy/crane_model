@@ -30,7 +30,7 @@ CONSTANTS = cs.load_constants()
 AREAS = cs.axis_areas(CONSTANTS)
 #: Any pose; only the boom and arm columns can notice it.
 Q2, Q3 = 0.4, 0.7
-RATIO = cylinder_ratios(CONSTANTS, Q2, Q3)[: cs.K_PLANNED_DOF]
+RATIO = cylinder_ratios(CONSTANTS, Q2, Q3)[: cs.PLANNED_DOF]
 
 
 def force(p_a, p_b):
@@ -38,7 +38,7 @@ def force(p_a, p_b):
 
 
 def loaded(axis, a_bar, b_bar):
-    p_a, p_b = np.zeros(cs.K_ACTUATED_DOF), np.zeros(cs.K_ACTUATED_DOF)
+    p_a, p_b = np.zeros(cs.ACTUATED_DOF), np.zeros(cs.ACTUATED_DOF)
     p_a[axis], p_b[axis] = a_bar * BAR_TO_PA, b_bar * BAR_TO_PA
     return p_a, p_b
 
@@ -73,8 +73,8 @@ def test_the_sign_follows_the_loaded_chamber_in_both_directions():
     # A high, B low is the extending force on all five; swapping the two
     # reverses it. Magnitudes differ -- the areas are not symmetric -- so only
     # the sign is asserted, and it carries the transmission's own sign.
-    high = np.full(cs.K_ACTUATED_DOF, 200.0 * BAR_TO_PA)
-    low = np.full(cs.K_ACTUATED_DOF, 5.0 * BAR_TO_PA)
+    high = np.full(cs.ACTUATED_DOF, 200.0 * BAR_TO_PA)
+    low = np.full(cs.ACTUATED_DOF, 5.0 * BAR_TO_PA)
     assert np.all(np.sign(force(high, low)) == np.sign(RATIO))
     assert np.all(np.sign(force(low, high)) == -np.sign(RATIO))
 
@@ -87,7 +87,7 @@ def symbolic_ratios(q2, q3):
         [symbol],
         [ca.vertcat(*cs.jacobian_diagonal(CONSTANTS, symbol[0], symbol[1]))],
     )
-    return np.asarray(graph([q2, q3])).reshape(cs.K_ACTUATED_DOF)
+    return np.asarray(graph([q2, q3])).reshape(cs.ACTUATED_DOF)
 
 
 @pytest.mark.parametrize("q2, q3", [(-0.4, 0.0), (0.0, 0.7), (0.9, 1.4), (1.5, 2.4)])
@@ -102,7 +102,7 @@ def test_a_boom_angle_the_four_bar_cannot_reach_raises_rather_than_returning_nan
     # NaN. Silently seeding that would poison the carried rows and then vanish
     # from any score that masks on a magnitude.
     assert np.isnan(symbolic_ratios(-1.3, 0.7)[1])
-    zero = np.zeros(cs.K_ACTUATED_DOF)
+    zero = np.zeros(cs.ACTUATED_DOF)
     with pytest.raises(CraneModelError):
         actuated_force_from_pressure(CONSTANTS, -1.3, 0.7, zero, zero)
 
@@ -111,14 +111,14 @@ def test_the_transmission_multiplies_the_chamber_force_and_the_tool_is_dropped()
     # Direction, against a ratio this module did not compute: the boom column
     # must be chamber force *times* ds/dq, not divided by it -- the two differ
     # by a factor of 4.9 there and the output map fixes which.
-    p_a = np.full(cs.K_ACTUATED_DOF, 175.0 * BAR_TO_PA)
-    p_b = np.full(cs.K_ACTUATED_DOF, 60.0 * BAR_TO_PA)
+    p_a = np.full(cs.ACTUATED_DOF, 175.0 * BAR_TO_PA)
+    p_b = np.full(cs.ACTUATED_DOF, 60.0 * BAR_TO_PA)
     chamber = np.array(
         [
             AREAS[axis].a_a * p_a[axis] - AREAS[axis].a_b * p_b[axis]
-            for axis in range(cs.K_PLANNED_DOF)
+            for axis in range(cs.PLANNED_DOF)
         ]
     )
     tau = force(p_a, p_b)
-    assert tau.shape == (cs.K_PLANNED_DOF,)
-    assert tau == pytest.approx(chamber * symbolic_ratios(Q2, Q3)[: cs.K_PLANNED_DOF])
+    assert tau.shape == (cs.PLANNED_DOF,)
+    assert tau == pytest.approx(chamber * symbolic_ratios(Q2, Q3)[: cs.PLANNED_DOF])

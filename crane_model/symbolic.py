@@ -38,6 +38,16 @@ import pinocchio.casadi as cpin
 import yaml
 
 from .conventions import (
+    ACTUATED_DOF,
+    ACTUATED_INDICES,
+    GENERALIZED_DOF,
+    NX_RIGID,
+    PASSIVE_DOF,
+    PASSIVE_INDICES,
+    PLANNED_AXES,
+    PLANNED_DOF,
+    PLANNED_INDICES,
+    TOOL_AXIS,
     Frame,
     Tool,
     default_actuator_path,
@@ -46,18 +56,9 @@ from .conventions import (
 from .description import parse as parse_description
 
 # --- the canonical eight -----------------------------------------------------
-
-K_GENERALIZED_DOF = 8
-K_ACTUATED_DOF = 6
-K_PASSIVE_DOF = 2
-
-# I_a and I_u. Neither class is contiguous: every block of M and every row of h
-# is gathered through these, not sliced -- as `detail::kActuatedRows` is.
-K_ACTUATED_ROWS = (0, 1, 2, 3, 6, 7)
-K_PASSIVE_ROWS = (4, 5)
-
-# The tool's slot among the actuated six, i.e. `cylinder::kToolAxis`.
-K_TOOL_AXIS = 5
+# The dimensions, I_a, I_u and I_ctrl are `conventions`', re-exported here
+# because every consumer reads them off this module. `NX_RIGID` lives there too
+# so `mujoco_plant` can state the rigid state without CasADi or Pinocchio.
 
 # Coulomb friction is `F_C tanh(dq / eps)` -- a sign, smoothed so the OCP can
 # differentiate it. eps is the rate at which the sway counts as settled
@@ -67,34 +68,25 @@ K_TOOL_AXIS = 5
 COULOMB_SMOOTHING_RAD_S = 0.02
 
 # --- what the OCPs plan, after issue 068 --------------------------------------
-# The actuated six minus the tool. `K_PLANNED_ROWS` is canonical indices,
-# `K_PLANNED_AXES` actuated: transmission/output map per *axis*, M per *coordinate*.
-K_PLANNED_DOF = K_ACTUATED_DOF - 1
-K_PLANNED_ROWS = K_ACTUATED_ROWS[:K_PLANNED_DOF]
-K_PLANNED_AXES = tuple(range(K_PLANNED_DOF))
-
-# The rigid-body half of `x`: what a consumer built without an actuator gets.
-NX_RIGID = 2 * K_PLANNED_DOF + 2 * K_PASSIVE_DOF
-
 # The planned joint-velocity commands; `u` for a consumer built without actuator.
-NU = K_PLANNED_DOF
+NU = PLANNED_DOF
 
 # The blocks of `x`, in the order `crane_mpc/src/ocp.cpp` reduces to and expands
 # from: planned positions, passive positions, planned rates, passive rates.
 X_PLANNED_POSITION = 0
-X_PASSIVE_POSITION = K_PLANNED_DOF
-X_PLANNED_VELOCITY = K_PLANNED_DOF + K_PASSIVE_DOF
-X_PASSIVE_VELOCITY = 2 * K_PLANNED_DOF + K_PASSIVE_DOF
+X_PASSIVE_POSITION = PLANNED_DOF
+X_PLANNED_VELOCITY = PLANNED_DOF + PASSIVE_DOF
+X_PASSIVE_VELOCITY = 2 * PLANNED_DOF + PASSIVE_DOF
 
 # --- C3 -----------------------------------------------------------------------
 # Fit keys for the five planned axes; the gripper is in the file but not planned.
-K_AXIS_KEYS = ("sw", "ha", "ka", "sa", "ro")
+AXIS_KEYS = ("sw", "ha", "ka", "sa", "ro")
 
 
 @dataclass(frozen=True)
 class ActuatorFit:
     """
-    C3's two fitted numbers per planned axis, in `K_PLANNED_AXES` order.
+    C3's two fitted numbers per planned axis, in `PLANNED_AXES` order.
 
     `k` is block 3's force-state stiffness, `tau_v` block 2's command lag. Block
     1, the 60 ms transport delay, is **not** here: common to every axis, it lives
@@ -110,7 +102,7 @@ class ActuatorFit:
     @property
     def lag_axes(self) -> tuple[int, ...]:
         """The axes that get a `u_f` state. `tau_v = 0` is a pole at infinity."""
-        return tuple(axis for axis in K_PLANNED_AXES if self.tau_v[axis] > 0.0)
+        return tuple(axis for axis in PLANNED_AXES if self.tau_v[axis] > 0.0)
 
 
 def load_actuator_fit(path=None) -> ActuatorFit:
@@ -129,7 +121,7 @@ def load_actuator_fit(path=None) -> ActuatorFit:
         raise ValueError(f"{path}: carries no axes mapping")
 
     k, tau_v = [], []
-    for key in K_AXIS_KEYS:
+    for key in AXIS_KEYS:
         if key not in axes:
             raise ValueError(f"{path}: no fit for axis {key!r}")
         entry = axes[key]
@@ -150,12 +142,12 @@ def load_actuator_fit(path=None) -> ActuatorFit:
 
 
 #: The fit as shipped. Read once, at import, because `NX` is derived from it.
-K_ACTUATOR_FIT = load_actuator_fit()
+ACTUATOR_FIT = load_actuator_fit()
 
 #: The axes carrying a command-lag state, derived from the fit, never by hand.
 #: `ka` (the arm) is fitted at `tau_v = 0`: no `u_f` state, its `u_f` *is* `u`.
-K_LAG_AXES = K_ACTUATOR_FIT.lag_axes
-K_COMMAND_LAG_DOF = len(K_LAG_AXES)
+LAG_AXES = ACTUATOR_FIT.lag_axes
+COMMAND_LAG_DOF = len(LAG_AXES)
 
 # The C3 state extends the rigid-body offsets rather than renumbering them.
 X_COMMAND_LAG = NX_RIGID
@@ -170,12 +162,12 @@ X_COMMAND_LAG = NX_RIGID
 # *before* the force state because `v_s >= 0` is a box, the force states
 # deliberately carry none, and acados' `idxbx` is only readable while the boxed
 # rows are a contiguous prefix.
-X_PROGRESS = NX_RIGID + K_COMMAND_LAG_DOF
+X_PROGRESS = NX_RIGID + COMMAND_LAG_DOF
 X_PROGRESS_RATE = X_PROGRESS + 1
-K_PROGRESS_DOF = 2
+PROGRESS_DOF = 2
 
-X_ACTUATED_FORCE = X_PROGRESS + K_PROGRESS_DOF
-NX = NX_RIGID + K_COMMAND_LAG_DOF + K_PROGRESS_DOF + K_PLANNED_DOF
+X_ACTUATED_FORCE = X_PROGRESS + PROGRESS_DOF
+NX = NX_RIGID + COMMAND_LAG_DOF + PROGRESS_DOF + PLANNED_DOF
 
 # The boxed rows of `x`: everything up to the force state, which constraint 6
 # bounds instead of a box.
@@ -188,7 +180,7 @@ NU_PROGRESS = NU + 1
 # C4 (opt-in): the command `c` a state, appended so every offset above holds;
 # `u[:NU]` is then its rate `dc`, and C3 reads `c` where it read `u`.
 X_COMMAND = NX
-NX_COMMAND = NX + K_PLANNED_DOF
+NX_COMMAND = NX + PLANNED_DOF
 
 # --- the parameter vector -----------------------------------------------------
 # One pinned tool coordinate and one payload body: mass, CoM in K8, the six
@@ -205,11 +197,11 @@ INERTIA_ENTRIES = ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
 # --- the output map z ---------------------------------------------------------
 # Four blocks of six -- six although the OCPs plan five: the tool cylinder is
 # still in the model, and reporting what it carries keeps that checkable.
-K_OUTPUT_DOF = 24
-K_ACTUATED_FORCE_OFFSET = 0
-K_CYLINDER_FORCE_OFFSET = 6
-K_PISTON_VELOCITY_OFFSET = 12
-K_AXIS_FLOW_OFFSET = 18
+NZ = 24
+Z_ACTUATED_FORCE = 0
+Z_CYLINDER_FORCE = 6
+Z_PISTON_VELOCITY = 12
+Z_AXIS_FLOW = 18
 
 # The link a payload attaches to.
 PAYLOAD_MOUNT_LINK = "K8_rotator_lower_part"
@@ -344,8 +336,8 @@ def load_constants(path: Path | None = None) -> Constants:
     out.eps_v = _number(root, "smoothing.eps_v", path)
 
     joints = _at(root, "joints", path)
-    if len(joints) != K_GENERALIZED_DOF:
-        raise ValueError(f"{path}: joints is not {K_GENERALIZED_DOF} entries")
+    if len(joints) != GENERALIZED_DOF:
+        raise ValueError(f"{path}: joints is not {GENERALIZED_DOF} entries")
     out.joints = tuple(joints)
 
     overrides = root.get("damping_overrides") or []
@@ -379,7 +371,7 @@ class AxisAreas:
 
 def axis_areas(constants: Constants) -> list:
     """Compose the per-axis areas, as the circuit topology does."""
-    areas = [AxisAreas() for _ in range(K_ACTUATED_DOF)]
+    areas = [AxisAreas() for _ in range(ACTUATED_DOF)]
     # q1 slewing: two cylinders, symmetric circuit, so both chambers see 2 A_A.
     areas[0] = AxisAreas(
         2.0 * constants.slewing_a_a,
@@ -535,7 +527,7 @@ def jacobian_diagonal(constants: Constants, q2, q3) -> list:
     The geometry couples no axes: off-diagonals are structurally zero and never
     formed. Only q2 and q3 enter; the other four are constant or one-to-one.
     """
-    diagonal = [None] * K_ACTUATED_DOF
+    diagonal = [None] * ACTUATED_DOF
     # q1 slewing: rack and pinion, the only constant transmission.
     diagonal[0] = ca.SX(constants.r_gear)
     diagonal[1] = boom_ratio(constants, q2)
@@ -720,30 +712,30 @@ class CraneSymbolicModel:
 
         # The canonical eight, reassembled from what this problem plans plus the
         # pinned tool coordinate. Tool rate and acceleration are zero.
-        self.q = ca.SX.zeros(K_GENERALIZED_DOF)
-        self.dq = ca.SX.zeros(K_GENERALIZED_DOF)
-        for axis, row in enumerate(K_PLANNED_ROWS):
+        self.q = ca.SX.zeros(GENERALIZED_DOF)
+        self.dq = ca.SX.zeros(GENERALIZED_DOF)
+        for axis, row in enumerate(PLANNED_INDICES):
             self.q[row] = self.x[X_PLANNED_POSITION + axis]
             self.dq[row] = self.x[X_PLANNED_VELOCITY + axis]
-        for index, row in enumerate(K_PASSIVE_ROWS):
+        for index, row in enumerate(PASSIVE_INDICES):
             self.q[row] = self.x[X_PASSIVE_POSITION + index]
             self.dq[row] = self.x[X_PASSIVE_VELOCITY + index]
-        self.q[K_ACTUATED_ROWS[K_TOOL_AXIS]] = self.q_tool
+        self.q[ACTUATED_INDICES[TOOL_AXIS]] = self.q_tool
 
         # --- the equations of motion ------------------------------------------
-        self.mass, self.bias = self.equations(self.q, self.dq, self.payload)
+        self.mass, self.h_damped = self.equations(self.q, self.dq, self.payload)
 
-        m_aa, m_au, m_ua, m_uu, h_a, h_u = self._partition(self.mass, self.bias)
+        m_aa, m_au, m_ua, m_uu, h_a, h_u = self._partition(self.mass, self.h_damped)
         self.mass_uu = m_uu
-        self.mass_ua = m_ua[:, K_PLANNED_AXES]
-        self.bias_u = h_u
+        self.mass_ua = m_ua[:, PLANNED_AXES]
+        self.h_damped_u = h_u
 
-        planned = list(K_PLANNED_AXES)
-        self.ddq_a = ca.SX.zeros(K_ACTUATED_DOF)
+        planned = list(PLANNED_AXES)
+        self.ddq_a = ca.SX.zeros(ACTUATED_DOF)
         if actuator is None:
             # No actuator: the input *is* the actuated acceleration, passive rows
             # follow it, `tau_a` is the inverse dynamics that produced it.
-            for axis in K_PLANNED_AXES:
+            for axis in PLANNED_AXES:
                 self.ddq_a[axis] = self.u[axis]
 
             # ddq_u = -M_uu⁻¹ (M_ua ddq_a + h_u); h_u already carries D_uu dq_u.
@@ -765,14 +757,14 @@ class CraneSymbolicModel:
             self.progress_accel = None
             self.command_lag_rate = ca.SX.zeros(0)
             self.actuated_force_rate = ca.SX.zeros(0)
-            self.actuated_force_static = ca.substitute(
-                self.tau_a[:K_PLANNED_DOF], self.u, ca.SX.zeros(NU)
+            self.h_eff = ca.substitute(
+                self.tau_a[:PLANNED_DOF], self.u, ca.SX.zeros(NU)
             )
             # The rows of xdot in the reduced order. The tool's two rows are
             # dq_tool = 0 and ddq_tool = 0 by construction and are not carried.
             self.xdot = ca.vertcat(
-                self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF],
-                self.x[X_PASSIVE_VELOCITY : X_PASSIVE_VELOCITY + K_PASSIVE_DOF],
+                self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + PLANNED_DOF],
+                self.x[X_PASSIVE_VELOCITY : X_PASSIVE_VELOCITY + PASSIVE_DOF],
                 self.u,
                 self.ddq_u,
             )
@@ -781,54 +773,54 @@ class CraneSymbolicModel:
             # deliberately absent: it lives in the node's predictor and a copy
             # here would double-count it. Block 2, the PT1 lag: only axes with
             # positive tau_v get a state; the arm's is 0, so its `u_f` is `u`.
-            dq_a = self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF]
-            lag_slot = {axis: slot for slot, axis in enumerate(K_LAG_AXES)}
+            dq_a = self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + PLANNED_DOF]
+            lag_slot = {axis: slot for slot, axis in enumerate(LAG_AXES)}
             self.u_f = ca.vertcat(
                 *[
                     self.x[X_COMMAND_LAG + lag_slot[axis]]
                     if axis in lag_slot
                     else self.command[axis]
-                    for axis in K_PLANNED_AXES
+                    for axis in PLANNED_AXES
                 ]
             )
             self.command_lag_rate = ca.vertcat(
                 *[
                     (self.command[axis] - self.u_f[axis]) / actuator.tau_v[axis]
-                    for axis in K_LAG_AXES
+                    for axis in LAG_AXES
                 ]
             )
 
             # Block 3, the force state. A *state*, so `tau_a` is read off `x`
             # rather than assembled -- which turns constraint 6 into
             # `x_j / J_c,ii(q)` and drops crba out of it.
-            tau_p = self.x[X_ACTUATED_FORCE : X_ACTUATED_FORCE + K_PLANNED_DOF]
+            tau_p = self.x[X_ACTUATED_FORCE : X_ACTUATED_FORCE + PLANNED_DOF]
             self.actuated_force_rate = ca.vertcat(
                 *[
                     actuator.k[axis] * (self.u_f[axis] - dq_a[axis])
-                    for axis in K_PLANNED_AXES
+                    for axis in PLANNED_AXES
                 ]
             )
 
             # Block 5, the load: forward dynamics. ABA's arrow but **not**
             # `cpin.aba` -- the parsed model has 18 velocity rows under P, so ABA
             # would let the four cylinder sub-chains and the mimicked telescope
-            # half move freely. `self.mass`/`self.bias` are already P'MP and P'h,
+            # half move freely. `self.mass`/`self.h_damped` are already P'MP and P'h,
             # so this is one dense solve of seven rows; the tool is pinned.
             m_pp = m_aa[planned, planned]
             m_pu = m_au[planned, :]
             system = ca.blockcat([[m_pp, m_pu], [self.mass_ua, m_uu]])
             solution = ca.solve(system, ca.vertcat(tau_p - h_a[planned], -h_u))
-            ddq_p = solution[:K_PLANNED_DOF]
-            self.ddq_u = solution[K_PLANNED_DOF:]
-            for axis in K_PLANNED_AXES:
+            ddq_p = solution[:PLANNED_DOF]
+            self.ddq_u = solution[PLANNED_DOF:]
+            for axis in PLANNED_AXES:
                 self.ddq_a[axis] = ddq_p[axis]
 
             # tau_a's tool row is the constraint torque holding the gripper
             # still; the output map reports six, only five come from the state.
             tau_tool = (
-                h_a[K_TOOL_AXIS]
-                + ca.mtimes(m_aa[K_TOOL_AXIS, :], self.ddq_a)
-                + ca.mtimes(m_au[K_TOOL_AXIS, :], self.ddq_u)
+                h_a[TOOL_AXIS]
+                + ca.mtimes(m_aa[TOOL_AXIS, :], self.ddq_a)
+                + ca.mtimes(m_au[TOOL_AXIS, :], self.ddq_u)
             )
             self.tau_a = ca.vertcat(tau_p, tau_tool)
 
@@ -840,7 +832,7 @@ class CraneSymbolicModel:
                 -(m_uu[1, 1] * h_u[0] - m_uu[0, 1] * h_u[1]) / determinant,
                 -(m_uu[0, 0] * h_u[1] - m_uu[1, 0] * h_u[0]) / determinant,
             )
-            self.actuated_force_static = h_a[planned] + ca.mtimes(m_pu, ddq_u_static)
+            self.h_eff = h_a[planned] + ca.mtimes(m_pu, ddq_u_static)
 
             # `s` advances at `v_s`, driven by the sixth input. Nothing else in
             # the plant reads either row; the coupling is through the cost.
@@ -849,8 +841,8 @@ class CraneSymbolicModel:
             self.progress_accel = self.u[U_PROGRESS_ACCEL]
 
             self.xdot = ca.vertcat(
-                self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + K_PLANNED_DOF],
-                self.x[X_PASSIVE_VELOCITY : X_PASSIVE_VELOCITY + K_PASSIVE_DOF],
+                self.x[X_PLANNED_VELOCITY : X_PLANNED_VELOCITY + PLANNED_DOF],
+                self.x[X_PASSIVE_VELOCITY : X_PASSIVE_VELOCITY + PASSIVE_DOF],
                 ddq_p,
                 self.ddq_u,
                 self.command_lag_rate,
@@ -870,7 +862,10 @@ class CraneSymbolicModel:
 
     def equations(self, q, dq, payload):
         """
-        M and h + D dq in the canonical eight coordinates.
+        M and `h_damped` in the canonical eight coordinates.
+
+        `h_damped` is h + D dq + the smoothed Coulomb term, i.e. everything that
+        is not M ddq -- the register's h is the first summand alone.
 
         The same `crba`/`nonLinearEffects` the numeric path calls, same parsed
         description, same P, damping and payload body. Nothing restates a term.
@@ -905,9 +900,9 @@ class CraneSymbolicModel:
             return data.M[row, column] if row <= column else data.M[column, row]
 
         drives = self.description.drives
-        mass = ca.SX.zeros(K_GENERALIZED_DOF, K_GENERALIZED_DOF)
-        for row in range(K_GENERALIZED_DOF):
-            for column in range(row, K_GENERALIZED_DOF):
+        mass = ca.SX.zeros(GENERALIZED_DOF, GENERALIZED_DOF)
+        for row in range(GENERALIZED_DOF):
+            for column in range(row, GENERALIZED_DOF):
                 total = ca.SX.zeros()
                 for left_index, left_weight in drives[row]:
                     for right_index, right_weight in drives[column]:
@@ -917,18 +912,18 @@ class CraneSymbolicModel:
                 mass[row, column] = total
                 mass[column, row] = total
 
-        bias = ca.SX.zeros(K_GENERALIZED_DOF)
-        for row in range(K_GENERALIZED_DOF):
+        h_damped = ca.SX.zeros(GENERALIZED_DOF)
+        for row in range(GENERALIZED_DOF):
             total = ca.SX.zeros()
             for index, weight in drives[row]:
                 total += weight * data.nle[index]
-            bias[row] = (
+            h_damped[row] = (
                 total
                 + self.description.damping[row] * dq[row]
                 + self.description.friction[row]
                 * ca.tanh(dq[row] / COULOMB_SMOOTHING_RAD_S)
             )
-        return mass, bias
+        return mass, h_damped
 
     def tool_position(self, q):
         """
@@ -979,17 +974,21 @@ class CraneSymbolicModel:
         return configuration, velocity
 
     @staticmethod
-    def _partition(mass, bias):
-        """M and h split by the actuated/passive partition, gathered by index."""
-        actuated = list(K_ACTUATED_ROWS)
-        passive = list(K_PASSIVE_ROWS)
+    def _partition(mass, h_damped):
+        """
+        M and `h_damped` split by the partition, gathered by index.
+
+        The returned `h_a`/`h_u` carry the damping and Coulomb terms with them.
+        """
+        actuated = list(ACTUATED_INDICES)
+        passive = list(PASSIVE_INDICES)
         return (
             mass[actuated, actuated],
             mass[actuated, passive],
             mass[passive, actuated],
             mass[passive, passive],
-            bias[actuated],
-            bias[passive],
+            h_damped[actuated],
+            h_damped[passive],
         )
 
     def _output_map(self):
@@ -1002,12 +1001,12 @@ class CraneSymbolicModel:
         differentiated.
         """
         areas = axis_areas(self.constants)
-        dq_a = ca.vertcat(*[self.dq[row] for row in K_ACTUATED_ROWS])
+        dq_a = ca.vertcat(*[self.dq[row] for row in ACTUATED_INDICES])
 
         cylinder_force = []
         piston_velocity = []
         axis_flow = []
-        for axis in range(K_ACTUATED_DOF):
+        for axis in range(ACTUATED_DOF):
             ratio = self.cylinder_jacobian[axis]
             velocity = ratio * dq_a[axis]
             magnitude = ca.sqrt(
@@ -1042,6 +1041,6 @@ class CraneSymbolicModel:
         return ca.vertcat(
             *[
                 areas[axis].a_a * p_a[axis] - areas[axis].a_b * p_b[axis]
-                for axis in range(K_ACTUATED_DOF)
+                for axis in range(ACTUATED_DOF)
             ]
         )

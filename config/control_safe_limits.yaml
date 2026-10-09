@@ -146,7 +146,7 @@ known_gaps:
     128 declined to narrow a number it could not attribute. crane_planning
     therefore does **not** intersect its tool range with this row and keeps the
     description's. **Nor does crane_mpc** -- corrected by 231: `position_box`
-    slices `[:K_PLANNED_DOF]` and that is 5, so the tool row stops at the rotator
+    slices `[:PLANNED_DOF]` and that is 5, so the tool row stops at the rotator
     and q8 enters the problem as a parameter (`pin_tool`), not as a boxed state.
     Nothing anywhere boxes the tool coordinate; the earlier note here claimed
     constraint 1 refuses a tool pose below 0.23 m and it does not"

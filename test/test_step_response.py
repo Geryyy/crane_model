@@ -35,7 +35,7 @@ import numpy as np
 import pytest
 from crane_model.actuator import C3Actuator
 from crane_model.conventions import default_actuator_path
-from crane_model.symbolic import K_AXIS_KEYS, K_PLANNED_DOF, load_actuator_fit
+from crane_model.symbolic import AXIS_KEYS, PLANNED_DOF, load_actuator_fit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURE = os.path.join(HERE, "step_response_fixture.json")
@@ -91,9 +91,9 @@ def step_response(axis: str, m_ii: float, times) -> np.ndarray:
     same equations from zero -- which is also why the fixture's unknown
     amplitude does not matter.
     """
-    row = K_AXIS_KEYS.index(axis)
+    row = AXIS_KEYS.index(axis)
     actuator = C3Actuator(DT, load_actuator_fit())
-    command, rate = np.zeros(K_PLANNED_DOF), np.zeros(K_PLANNED_DOF)
+    command, rate = np.zeros(PLANNED_DOF), np.zeros(PLANNED_DOF)
     command[row] = 1.0
     d = damping()[axis]
 
@@ -106,7 +106,7 @@ def step_response(axis: str, m_ii: float, times) -> np.ndarray:
     return np.array([walked[round(t / DT)] for t in times])
 
 
-@pytest.mark.parametrize("axis", K_AXIS_KEYS)
+@pytest.mark.parametrize("axis", AXIS_KEYS)
 def test_the_fit_still_reproduces_the_machines_step(fixture, axis):
     entry = fixture["axes"][axis]
     assert abs(entry["dt_s"] - DT) < 1e-4, "the bag did not run at the fit's rate"
@@ -120,7 +120,7 @@ def test_the_fit_still_reproduces_the_machines_step(fixture, axis):
     )
 
 
-@pytest.mark.parametrize("axis", K_AXIS_KEYS)
+@pytest.mark.parametrize("axis", AXIS_KEYS)
 def test_no_axis_has_moved_when_the_transport_delay_expires(fixture, axis):
     """At 60 ms the command has not arrived yet, on the machine or in the model.
 

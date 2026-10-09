@@ -319,7 +319,7 @@ payload is a **symbol** in the parameter vector, not a constant baked into a
 frozen signature.
 
 The symbolic parity gtest went with the test-surface strip of 104. It had proven
-`mass`/`bias`, the passive rows of `M` and `h_u`, the reduced actuated dynamics,
+`mass`/`h_damped`, the passive rows of `M` and `h_u`, the reduced actuated dynamics,
 cylinder velocity, pump flow, `cylinder_jacobian` and `chamber_force` against the
 numeric API at `1e-9` relative, and the passive acceleration out of `xdot`
 against the passive rows of `inverse_dynamics` vanishing at `1e-6` N m. It also

@@ -17,8 +17,27 @@ ACTUATED_DOF = 6
 PASSIVE_DOF = 2
 
 #: Positions of the actuated and passive coordinates in the generalized vector.
+#: Neither class is contiguous: blocks of M and rows of h are gathered through
+#: these, never sliced.
 ACTUATED_INDICES = (0, 1, 2, 3, 6, 7)
 PASSIVE_INDICES = (4, 5)
+
+#: I_ctrl: the actuated coordinates a controller plans over -- the actuated six
+#: minus the tool, which the low-level controller works. `PLANNED_INDICES` is
+#: canonical indices, `PLANNED_AXES` actuated: transmission and output map are
+#: per *axis*, M per *coordinate*.
+PLANNED_DOF = ACTUATED_DOF - 1
+PLANNED_INDICES = ACTUATED_INDICES[:PLANNED_DOF]
+PLANNED_AXES = tuple(range(PLANNED_DOF))
+
+#: The tool's slot among the actuated six, i.e. `cylinder::kToolAxis`; its
+#: canonical index is `ACTUATED_INDICES[TOOL_AXIS]`.
+TOOL_AXIS = PLANNED_DOF
+
+#: The rigid-body state q_a(5), q_u(2), dq_a(5), dq_u(2) -- what an OCP built
+#: without an actuator carries. Here rather than in `symbolic` so `mujoco_plant`
+#: can state it without CasADi or Pinocchio.
+NX_RIGID = 2 * PLANNED_DOF + 2 * PASSIVE_DOF
 
 
 class Tool(enum.Enum):

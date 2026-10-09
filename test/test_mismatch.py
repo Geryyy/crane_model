@@ -15,27 +15,27 @@ import numpy as np
 import pytest
 from crane_model.errors import CraneModelError
 from crane_model.mismatch import PI_RUNGS, PsiGain, perturb_fit, pi_rung
-from crane_model.symbolic import K_ACTUATOR_FIT, load_actuator_fit
+from crane_model.symbolic import ACTUATOR_FIT, load_actuator_fit
 from crane_model.velocity_loop import load_velocity_loop
 
 
 def test_nothing_configured_is_the_shipped_plant():
     """Identity in every field, and exactly -- not merely close."""
     fit, damping = perturb_fit()
-    assert fit == K_ACTUATOR_FIT
-    assert np.array_equal(damping, np.ones(len(K_ACTUATOR_FIT.k)))
+    assert fit == ACTUATOR_FIT
+    assert np.array_equal(damping, np.ones(len(ACTUATOR_FIT.k)))
     command = np.array([0.4, -0.2, 0.0, 0.1, -0.7])
     assert np.array_equal(PsiGain().apply(command), command)
     # In memory, plant side only: the export key digests the file, so a
     # perturbation that reached it would move the solver with the plant.
-    assert load_actuator_fit() == K_ACTUATOR_FIT
+    assert load_actuator_fit() == ACTUATOR_FIT
 
 
 def test_a_positive_lag_shift_is_refused_by_axis_name():
     """
     The arm is fitted at `tau_v = 0`, so *any* positive shift gives it a state.
 
-    That moves `K_LAG_AXES`, hence `NX`, hence the export key: the solver would
+    That moves `LAG_AXES`, hence `NX`, hence the export key: the solver would
     then refuse the very fit the plant is running.
     """
     with pytest.raises(CraneModelError, match=r"across zero on axis \['ka'\]"):
@@ -44,7 +44,7 @@ def test_a_positive_lag_shift_is_refused_by_axis_name():
 
 def test_a_negative_shift_is_refused_by_the_arm_too():
     """
-    `tau_v = -0.01` keeps `K_LAG_AXES` and is worse for it.
+    `tau_v = -0.01` keeps `LAG_AXES` and is worse for it.
 
     `C3Actuator` reads a non-positive `tau_v` as `alpha = 1` -- no lag at all --
     so the dead time keeps the whole shift, the sum stops being the identified
@@ -62,7 +62,7 @@ def test_the_split_is_settable_at_constant_sum():
     The shipped fit is not one: the dead time is common and the arm sits at
     `tau_v = 0`, so a shift at constant sum has nowhere to come from there.
     """
-    lagged = replace(K_ACTUATOR_FIT, tau_v=(0.1, 0.025, 0.02, 0.05, 0.125))
+    lagged = replace(ACTUATOR_FIT, tau_v=(0.1, 0.025, 0.02, 0.05, 0.125))
     shifted, _ = perturb_fit(lagged, lag_shift_s=-0.01)
     assert shifted.dead_time_s == pytest.approx(lagged.dead_time_s + 0.01)
     assert np.allclose(
@@ -83,7 +83,7 @@ def test_k_without_d_is_refused():
     with pytest.raises(CraneModelError, match=r"pair only with each other"):
         perturb_fit(d=scale)
     fit, damping = perturb_fit(k=scale, d=scale)
-    assert fit.k[0] == pytest.approx(1.2 * K_ACTUATOR_FIT.k[0])
+    assert fit.k[0] == pytest.approx(1.2 * ACTUATOR_FIT.k[0])
     assert damping[0] == pytest.approx(1.2)
 
 

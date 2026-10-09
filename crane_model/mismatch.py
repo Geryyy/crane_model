@@ -23,11 +23,11 @@ from dataclasses import replace
 import numpy as np
 
 from .errors import CraneModelError, ErrorCode
-from .symbolic import K_ACTUATOR_FIT, K_AXIS_KEYS, K_PLANNED_DOF, ActuatorFit
+from .symbolic import ACTUATOR_FIT, AXIS_KEYS, PLANNED_DOF, ActuatorFit
 
 #: The fit keys of the five planned axes, which is what a refusal names. The
-#: gripper is in `K_AXIS_KEYS` but not planned, so it never reaches C3.
-PLANNED_KEYS = K_AXIS_KEYS[:K_PLANNED_DOF]
+#: gripper is in `AXIS_KEYS` but not planned, so it never reaches C3.
+PLANNED_KEYS = AXIS_KEYS[:PLANNED_DOF]
 
 
 class PsiGain:
@@ -52,8 +52,8 @@ class PsiGain:
     @staticmethod
     def _side(value) -> np.ndarray:
         if value is None:
-            return np.ones(K_PLANNED_DOF)
-        return np.asarray(value, dtype=float).reshape(K_PLANNED_DOF).copy()
+            return np.ones(PLANNED_DOF)
+        return np.asarray(value, dtype=float).reshape(PLANNED_DOF).copy()
 
     def apply(self, u) -> np.ndarray:
         """`u` as the Paltronic receives it, once Psi got the gain wrong."""
@@ -81,7 +81,7 @@ def perturb_fit(fit: ActuatorFit | None = None, *, k=None, d=None, lag_shift_s=0
     an `ActuatorFit` field. It reaches the dynamics as MuJoCo's `dof_damping`
     (`actuator.py`), so scaling it is the caller's to do, on the plant.
     """
-    fit = K_ACTUATOR_FIT if fit is None else fit
+    fit = ACTUATOR_FIT if fit is None else fit
     shift = float(lag_shift_s)
     # `d_i` and `k_i` are one identification. Scaling `k` alone leaves zeta =
     # d/(2 sqrt(k M_ii)) somewhere no campaign measured, and nothing downstream
@@ -93,28 +93,28 @@ def perturb_fit(fit: ActuatorFit | None = None, *, k=None, d=None, lag_shift_s=0
             f"got k={k!r} with d={d!r}. Scaling k alone moves zeta silently -- "
             "pass both multipliers or neither",
         )
-    scale_k = np.ones(K_PLANNED_DOF) if k is None else _multipliers(k, "k")
-    scale_d = np.ones(K_PLANNED_DOF) if d is None else _multipliers(d, "d")
+    scale_k = np.ones(PLANNED_DOF) if k is None else _multipliers(k, "k")
+    scale_d = np.ones(PLANNED_DOF) if d is None else _multipliers(d, "d")
     stiffness = np.asarray(fit.k, dtype=float) * scale_k
 
     lagged = np.asarray(fit.tau_v, dtype=float) + shift
     # tau_v == 0 is a pole at infinity and gets no `u_f` state, so a sample that
-    # gives an axis a lag it had not, or takes one away, changes K_LAG_AXES,
+    # gives an axis a lag it had not, or takes one away, changes LAG_AXES,
     # hence NX, hence the export key: the solver would then refuse the very fit
-    # the plant is running. A *negative* tau_v keeps K_LAG_AXES and is worse for
+    # the plant is running. A *negative* tau_v keeps LAG_AXES and is worse for
     # it -- `C3Actuator` reads it as alpha = 1, so the lag silently clips to zero
     # while the dead time keeps the whole shift and the sum is no longer the
     # identified one.
     moved = [
         PLANNED_KEYS[axis]
-        for axis in range(K_PLANNED_DOF)
+        for axis in range(PLANNED_DOF)
         if (fit.tau_v[axis] > 0.0) != (lagged[axis] > 0.0) or lagged[axis] < 0.0
     ]
     if moved:
         raise CraneModelError(
             ErrorCode.INVALID_ARGUMENT,
             f"a {shift:+.4g} s lag shift takes tau_v across zero on axis "
-            f"{moved}, which moves K_LAG_AXES, NX and the export key. The arm is "
+            f"{moved}, which moves LAG_AXES, NX and the export key. The arm is "
             "fitted at tau_v = 0 and the dead time is common, so on the shipped "
             "fit the split cannot move in either direction",
         )
@@ -138,7 +138,7 @@ def _multipliers(value, name: str) -> np.ndarray:
     `dof_damping` and ends the run somewhere unrelated to the draw that caused it.
     """
     try:
-        scale = np.asarray(value, dtype=float).reshape(K_PLANNED_DOF).copy()
+        scale = np.asarray(value, dtype=float).reshape(PLANNED_DOF).copy()
     except ValueError as error:
         raise CraneModelError(
             ErrorCode.INVALID_ARGUMENT,
@@ -146,7 +146,7 @@ def _multipliers(value, name: str) -> np.ndarray:
         ) from error
     bad = [
         f"{PLANNED_KEYS[axis]}={scale[axis]:.6g}"
-        for axis in range(K_PLANNED_DOF)
+        for axis in range(PLANNED_DOF)
         if not (np.isfinite(scale[axis]) and scale[axis] > 0.0)
     ]
     if bad:

@@ -14,17 +14,16 @@ import numpy as np
 from .conventions import (
     ACTUATED_INDICES,
     GENERALIZED_DOF,
+    NX_RIGID,
     PASSIVE_INDICES,
+    PLANNED_INDICES,
+    TOOL_AXIS,
     canonical_joints,
 )
 from .errors import CraneModelError, ErrorCode
 from .linkage import DISPLAY_JOINTS, cylinder_joints, load_geometry
 
-PLANNED_INDICES = ACTUATED_INDICES[:5]
-TOOL_INDEX = ACTUATED_INDICES[5]
-
-#: `symbolic.py`'s rigid state: q_a(5), q_u(2), dq_a(5), dq_u(2).
-NX_RIGID = 14
+TOOL_INDEX = ACTUATED_INDICES[TOOL_AXIS]
 
 #: MuJoCo's viewer segfaults on interpreter teardown; `leave` skips it (exit 139).
 _VIEWER_OPENED = False
@@ -450,7 +449,7 @@ class MujocoPlant:
         )
 
     @property
-    def holding_force(self) -> np.ndarray:
+    def h_eff(self) -> np.ndarray:
         """
         What the five planned axes need to stand still in this pose.
 
@@ -462,8 +461,8 @@ class MujocoPlant:
         telescope half carries its own share, which only the projection picks up,
         and the passive pair is *not* held, so the seed is the one that leaves
         ddq_a = 0 while the sway rows accelerate freely. Same solve as
-        `symbolic.py`'s static seed -- `h_a + M_au ddq_u`, `ddq_u = -M_uu^-1 h_u`
-        -- and it has to be, or the two disagree at t = 0.
+        `symbolic.py`'s `h_eff` -- `h_a + M_au ddq_u`, `ddq_u = -M_uu^-1 h_u` --
+        and it has to be, or the two disagree at t = 0.
         """
         inertia = np.zeros((self.model.nv, self.model.nv))
         self._mj.mj_fullM(self.model, self.data, inertia)
@@ -633,7 +632,7 @@ def main(argv: list[str] | None = None) -> int:
     actuator = C3Actuator(
         timestep=plant.model.opt.timestep, tau_max=plant.effort_limits
     )
-    actuator.reset(tau=plant.holding_force)
+    actuator.reset(tau=plant.h_eff)
     loop = VelocityLoop(
         [gains_by_joint[names[index]] for index in PLANNED_INDICES],
         control_step,
