@@ -2,8 +2,9 @@
 Collision geometry and distance queries, on Coal.
 
 Fitted link primitives and the self pairs not worth checking come from
-config/collision_model.yaml; the C++ library compiles the same table in, having
-no `package://` resolver. Placements come from the parsed description at runtime.
+config/collision_model.yaml, fitted offline because the descriptions name
+collision geometry by `package://` mesh URI. Placements come from the parsed
+description at runtime.
 """
 
 from __future__ import annotations
@@ -244,8 +245,8 @@ def queries(
     """
     validate_scene(scene)
     pin.forwardKinematics(model, data, configuration)
-    # Only the base and the frames carrying a body, as `Model::place_bodies` in
-    # src/model.cpp: far more frames than primitives, refreshed per query otherwise.
+    # Only the base and the frames carrying a body: far more frames than
+    # primitives, and all of them would be refreshed per query otherwise.
     base_frame = model.getFrameId(Frame.MOUNTING_BASE.value)
     pin.updateFramePlacement(model, data, base_frame)
     for _, frame, _, _ in geometry.bodies:

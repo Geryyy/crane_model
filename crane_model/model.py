@@ -1,8 +1,8 @@
 """
 Numeric crane model on Pinocchio: kinematics, passive equilibrium, geometry.
 
-Planning-side counterpart of the C++ library, no realtime dynamics. Same URDF
-and config/hydraulics.yaml as the C++ side, so the two cannot drift.
+No dynamics: M and h are `symbolic.py`'s, the only transcription of them. Same
+URDF and config/hydraulics.yaml, so the two cannot drift.
 """
 
 from __future__ import annotations
@@ -164,7 +164,7 @@ class CraneModel:
             self._model, self._data, self._description.configuration(q)
         )
         # The two frames asked for, not all 130 the PZS100 carries: this is the
-        # inner loop of the planner's IK. `Model::pose` in src/model.cpp likewise.
+        # inner loop of the planner's IK.
         pin.updateFramePlacement(self._model, self._data, source)
         pin.updateFramePlacement(self._model, self._data, target)
         relative = self._data.oMf[source].actInv(self._data.oMf[target])

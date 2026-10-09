@@ -613,7 +613,7 @@ def main(argv: list[str] | None = None) -> int:
         "--hydraulics",
         "-H",
         default=None,
-        help="Hydraulics config YAML file (default: none)",
+        help="Hydraulics config YAML file (default: the package's own)",
     )
     parser.add_argument("--realtime", type=float, default=1.0)
     arguments = parser.parse_args(argv)

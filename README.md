@@ -1,23 +1,28 @@
 # crane_model
 
 Python shared model boundary for the concrete-block crane architecture.
-The public Python API provides the numeric model (forward kinematics, Jacobians,
-dynamics, collision queries) and the symbolic model (`crane_model/symbolic.py`)
-used by planning and control. Both operate on the same URDF description and
-hydraulics configuration.
+The numeric model (`crane_model/model.py`) provides forward kinematics,
+Jacobians, passive equilibrium and collision queries; the symbolic model
+(`crane_model/symbolic.py`) is the only statement of the equations of motion.
+Both operate on the same URDF description and hydraulics configuration.
 
 This page carries what the API left open and this library had to fix, and the
-measurements behind it. `crane_model/model.py` is the numeric backend;
+measurements behind it.
 
 ## Backends
 
 | Call | Backend |
 |---|---|
-| `cylinder_jacobian`, `transmission`, `cylinder_force` | closed-form cylinder geometry |
 | `forward_kinematics`, `jacobian` | Pinocchio, on the `robot_description_xml` the caller supplies |
-| `full_dynamics`, `inverse_dynamics`, `reduced_actuated_dynamics` | Pinocchio `crba`, `nonLinearEffects` and `rnea` on the same model |
 | `passive_equilibrium` | Newton on the passive rows of `rnea`, with Pinocchio's gravity Jacobian |
 | `collision_query`, `collision_queries` | Coal, over geometry fitted to the same description |
+
+**Numeric dynamics are not public API.** There is no `full_dynamics`,
+`inverse_dynamics`, `reduced_actuated_dynamics`, `cylinder_jacobian`,
+`transmission` or `cylinder_force` on `CraneModel`. $\mat M$ and $\vec h$ are
+`symbolic.py`'s; the cylinder transmission and the chamber force are
+`symbolic.jacobian_diagonal`, `symbolic.axis_areas`,
+`CraneSymbolicModel.chamber_force` and `pressure.actuated_force_from_pressure`.
 
 `CraneModel` constructor maps the canonical eight coordinates onto the parsed
 description by their URDF joint names, which keep their legacy spelling. A
@@ -31,10 +36,11 @@ the tool axis is caught at construction.
 The constants the description does not carry, with their own header explaining
 why each is there rather than compiled in. The `CraneModel` constructor reads it
 **before** the description, because the canonical joint map is in it. A missing
-file, a missing key, a key that is not a number or a damping override with no stated
-reason raises `CraneModelError` with code `ErrorCode.INVALID_ARGUMENT` naming the
-key — never a default, because a hydraulic constant that quietly fell back to zero
-is a force limit that quietly fell back to zero.
+file, a missing key or a key that is not a number raises out of the loader —
+plain `KeyError`/`ValueError` naming the key, not `CraneModelError`, because the
+config loaders sit outside the error model. Never a default, because a hydraulic
+constant that quietly fell back to zero is a force limit that quietly fell back
+to zero.
 
 The `pump` block and `system_pressure_pa` are not read by the model at all:
 they are `crane_mpc`'s and `crane_planning`'s, imported through
@@ -68,18 +74,21 @@ In the canonical eight coordinates:
 
 $$\mat{M}(q)\,\ddot q + \vec h(q,\dot q) + \mat D\,\dot q = \vec\tau$$
 
-`full_dynamics` returns `M`, the bias `h + D dq` and an inverse-dynamics torque;
-`inverse_dynamics` returns all eight rows for a given `ddq`;
-`reduced_actuated_dynamics` returns the effective inertia and residual of the
-actuated reduction.
+One transcription, and it is symbolic: `CraneSymbolicModel.equations(q, dq,
+payload)` runs Pinocchio's `crba` and `nonLinearEffects` over `casadi.SX` on the
+same parsed description the numeric model reads. The notes below are about that
+transcription — and about the description it reads, so they hold for the
+Pinocchio Jacobian and `MujocoPlant` too.
 
 ### The mimic joints are counted, not dropped
 
 Pinocchio drops `<mimic>`, so `q5_small_telescope` and the PZS100's mirrored
 `q11_right_rail_joint` are ordinary joints in the parsed model. Their velocity
-rows are constant multiples of the coordinate that drives them, so with that
-projection the model reports the projected mass matrix and bias vector: their
-inertia lands on `q4` and `q8` rather than being lost.
+rows are constant multiples of the coordinate that drives them, so everything
+here goes through `Description.projection` $\mat P$ — $\mat M = \mat P^\top \mat
+M_\text{full}\mat P$, $\vec h = \mat P^\top\vec h_\text{full}$, and the Jacobian
+column summed the same way: their inertia lands on `q4` and `q8` rather than
+being lost.
 
 The four cylinder sub-chains stay at their neutral configuration with zero
 velocity. They carry mass — about 166 kg of boom cylinder, 118 kg of arm
@@ -101,7 +110,8 @@ remapping.
 - **`h`** is `nonLinearEffects`, kept whole: the centrifugal coupling from
   slewing into the sway grows with radius and rate, and that term has to reach
   the passive rows.
-- **Gravity** is `ModelConfig::gravity_m_s2`. Nothing here compiles in a 9.81.
+- **Gravity** is the `gravity_m_s2` constructor argument, defaulted to
+  `(0, 0, -9.81)` and nowhere compiled in.
 - **`D`** is the selected description's `<dynamics damping>`. Two departures:
   - **the override table is empty** since 2026-09-07 (issue 127). Its one row
     forced the telescope to zero because the URDF's `3.4e4` was a simulation
@@ -112,22 +122,9 @@ remapping.
   - **the mimicked joints' own damping is not added.** The mirrored rail's entry
     is the same simulation number duplicated for Gazebo; adding it would
     silently double the PZS100 tool axis.
-  Coulomb friction, which the description also carries, is not applied: the
-  equation of motion has a viscous term and nothing else.
-
-### What `FullDynamics::inverse_dynamics_tau` is evaluated at
-
-The frozen struct carries a torque but `full_dynamics` takes no acceleration.
-The model reports it at the **consistent** acceleration with
-$\ddot q_\text{a}=\vec 0$ — the torque holding the actuated axes still while the
-pendulum swings freely. Its passive rows vanish by construction and its actuated
-rows are exactly `bias_eff`. The alternative reading, $\tau$ at
-$\ddot q=\vec 0$, would make the field a copy of `bias`.
-
-`reduced_actuated_dynamics` takes a `ddq_a` that enters neither output —
-$\bar{\mat M}$ and $\bar{\vec h}$ are properties of $(q,\dot q,\text{payload})$
-alone. It is validated for finiteness and otherwise unused; it stays in the
-signature because the API froze it there.
+- **Coulomb friction** is the description's `<dynamics friction>`, smoothed to
+  `F_C tanh(dq / 0.02)` so the OCP can differentiate it, and it rides in
+  `h_damped` with the viscous term.
 
 ### The payload
 
@@ -137,15 +134,17 @@ API leaves open:
 - **`inertia_k8_kg_m2` is about the payload's own centre of mass**, with the axes
   of `K8` — the URDF `<inertial>` convention, so the same numbers a description
   would carry for the same body. Not the inertia about the `K8` origin.
-- **`valid == False` is refused** with `CraneModelError` code `ErrorCode.INVALID_PAYLOAD`.
-  It is an explicit unknown, not permission to use a zero-mass body. **An empty gripper
-  is a declared payload of zero mass** — `valid = True`, `mass_kg = 0` — which is
-  accepted and is a different statement: a zero-mass body still carrying a
-  tensor is a different mass matrix from no body at all.
+- **`valid == False` is treated as no payload**, not refused: `_attach` returns
+  early. **An empty gripper is a declared payload of zero mass** — `valid =
+  True`, `mass_kg = 0` — and is a different statement: a zero-mass body still
+  carrying a tensor is a different mass matrix from no body at all. A caller who
+  means "unknown" and a caller who forgot to set `valid` get the same answer,
+  which the API contract records as built rather than as intended.
 
-Negative or non-finite mass, non-finite geometry, an asymmetric inertia or one
-that is not positive semi-definite raises the same error. Zero inertia is
-admissible: a point mass is a payload.
+Negative or non-finite mass raises `CraneModelError` with code
+`ErrorCode.INVALID_PAYLOAD`. The inertia is **not** checked for symmetry or
+positive semi-definiteness. Zero inertia is admissible: a point mass is a
+payload.
 
 ## Passive equilibrium
 
@@ -186,9 +185,8 @@ ratio between tool and payload.
 
 ### When there is nowhere to hang
 
-`SingularConfiguration` — the code `full_dynamics` and
-`reduced_actuated_dynamics` already use when the passive rows do not resolve.
-Three cases, none of which returns a pose:
+`SingularConfiguration`, the code `pressure.cylinder_ratios` also uses when a
+linkage does not close. Three cases, none of which returns a pose:
 
 - the crane folded far enough that the free hanging pose needs more tip travel
   than the description gives that joint, so the tool would rest against a stop
@@ -318,14 +316,13 @@ at `NX_RIGID = 14`, `NU = 5` and `NX = 25` once C3's actuator states are on. The
 payload is a **symbol** in the parameter vector, not a constant baked into a
 frozen signature.
 
-The symbolic parity gtest went with the test-surface strip of 104. It had proven
-`mass`/`h_damped`, the passive rows of `M` and `h_u`, the reduced actuated dynamics,
-cylinder velocity, pump flow, `cylinder_jacobian` and `chamber_force` against the
-numeric API at `1e-9` relative, and the passive acceleration out of `xdot`
-against the passive rows of `inverse_dynamics` vanishing at `1e-6` N m. It also
-asserted two things that are not dynamics, because a disagreement in them cancels
-everywhere else: the mimic projection Pinocchio drops, and that the damping
-override table reaches the Python model at all. A disagreement now surfaces as
+**Nothing holds it against a second implementation any more**: the parity gtest
+went with the test-surface strip of 104, and the numeric API it compared against
+no longer carries dynamics. What pins it now is `test_actuator.py` (C3 symbolic
+against integrated against the ARX2 closed form), `test_pressure_force.py`
+(symbolic against numpy for the transmission), `test_mujoco_plant.py` (gravity,
+equilibrium, telescope inertia and damping against Pinocchio) and, at the
+consumers, each OCP. A disagreement in the dynamics themselves surfaces as
 whichever OCP it breaks.
 
 ## The actuation system and the inner loop
@@ -437,19 +434,14 @@ Then re-derive the collision fit, the YAML spelling in one run — validated by
 
 ### Parity with the generated model
 
-`test/test_python_parity.py` compares this Python backend against the Maple/MATLAB
-model of `src/matlab_codegen/mp_crane` at 64 configurations out of the
-2026-08-19 recordings. It is the evidence for retiring that model.
+`test/test_python_parity.py` checks forward kinematics, the K8 orientation and
+`passive_equilibrium` against `test/recorded_parity_fixture.txt` — 64
+configurations out of the 2026-08-19 recordings, answered by the
+Maple/MATLAB model of `src/matlab_codegen/mp_crane`, which agreed to machine
+precision. What the campaign found where the two *disagreed* is
+`wiki/robot_model.md` 6; it is the evidence for retiring that model.
 
-The fixture, `test/recorded_parity_fixture.txt`, is **frozen**: the script that
-derived it and the evaluator went with the test-surface strip of 104, and `mp_crane`
-is retired, so its answers will not be recomputed. The generated model
-reaches this directory as a checked-in table of numbers only.
-
-The comparison is a ladder, not a tolerance. Forward kinematics and the passive
-equilibrium agree to machine precision. The passive rows of `M` and the bias do
-not, by 50 % — and the test evaluates this model three times: on the description
-as checked in, without the 200 kg rail gripper the generated model does not
-carry, and with the tool frame moved down by the 48.7 mm it drops, where the two
-agree to `1e-4`. Each rung names one defect in the retired model, and a change
-that made this model agree on the description as written would fail the first test.
+The fixture is **frozen**: the script that derived it and the evaluator went with
+the test-surface strip of 104, and `mp_crane` is retired, so its answers will not
+be recomputed. It is therefore a regression check against a recorded answer, not
+two implementations agreeing — the second implementation is gone.

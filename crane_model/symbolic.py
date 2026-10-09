@@ -257,7 +257,7 @@ class Constants:
     damping_overrides: tuple = ()
 
     # The sums the linkages actually rotate. Not measurements: each states which
-    # frame the other two numbers are in; `cylinder_geometry.hpp` writes them too.
+    # frame the other two numbers are in.
     def boom_link_x(self) -> float:
         return self.boom_a2 + self.boom_ps2_x
 
@@ -349,9 +349,9 @@ def load_constants(path: Path | None = None) -> Constants:
 
 # ---------------------------------------------------- the cylinder transmission
 #
-# `src/cylinder_geometry.hpp`, term for term. Every linkage is planar, so a
-# planar vector is a two-tuple and the arithmetic is written out. Nothing
-# branches: where a linkage does not close the ratio is non-finite, not flagged.
+# Every linkage is planar, so a planar vector is a two-tuple and the arithmetic
+# is written out. Nothing branches: where a linkage does not close the ratio is
+# non-finite, not flagged.
 
 
 @dataclass
@@ -609,9 +609,9 @@ def parse(
     """
     Parse one description onto the canonical eight coordinates.
 
-    Read twice, as `detail::parse` does: pinocchio builds the tree and **drops
-    `<mimic>`**, and with mimic parsing on it refuses the PZS100 outright (the
-    right rail mimics a joint later in its own depth-first order).
+    Read twice on purpose: pinocchio builds the tree and **drops `<mimic>`**,
+    and with mimic parsing on it refuses the PZS100 outright (the right rail
+    mimics a joint later in its own depth-first order).
     """
     # The canonical mapping -- joint binding, `<mimic>` scan, P, per-joint
     # damping -- lives in `crane_model.description`. Read there.
@@ -895,7 +895,7 @@ class CraneSymbolicModel:
         cpin.nonLinearEffects(model, data, configuration, velocity)
 
         # `crba` fills only the upper triangle of data.M, so the lower half is
-        # read back transposed -- the same reading `Model::Impl::mass_entry` does.
+        # read back transposed.
         def entry(row, column):
             return data.M[row, column] if row <= column else data.M[column, row]
 
@@ -997,7 +997,7 @@ class CraneSymbolicModel:
 
         Both non-smooth pieces of constraint 7 are smoothed for a gradient-based
         solver: |v| by sqrt(v² + eps²), the step in A^± at v = 0 by a tanh of
-        width eps_v. `Model::transmission` keeps the physical step -- it is not
+        width eps_v. `pressure.py` keeps the physical step -- it is not
         differentiated.
         """
         areas = axis_areas(self.constants)

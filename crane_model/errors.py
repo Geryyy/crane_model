@@ -1,8 +1,9 @@
 """
 Failure model for the Python crane model.
 
-The C++ API returns `Result<T>`; here a failure is an exception carrying the
-same `ErrorCode`.
+A failure is an exception carrying an `ErrorCode`, never a sentinel return.
+`UNSUPPORTED_TOOL` and `BACKEND_UNAVAILABLE` are declared and not raised.
+Config loaders outside the constructor raise plain `KeyError`/`ValueError`.
 """
 
 from __future__ import annotations

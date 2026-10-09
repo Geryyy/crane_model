@@ -2,7 +2,7 @@
 Canonical coordinates, frames and tool maps.
 
 Joint ordering is NOT restated here: it is read from config/hydraulics.yaml,
-the same file src/model.cpp and crane_model/symbolic.py read.
+the same file crane_model/symbolic.py reads.
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ PLANNED_DOF = ACTUATED_DOF - 1
 PLANNED_INDICES = ACTUATED_INDICES[:PLANNED_DOF]
 PLANNED_AXES = tuple(range(PLANNED_DOF))
 
-#: The tool's slot among the actuated six, i.e. `cylinder::kToolAxis`; its
-#: canonical index is `ACTUATED_INDICES[TOOL_AXIS]`.
+#: The tool's slot among the actuated six; its canonical index is
+#: `ACTUATED_INDICES[TOOL_AXIS]`.
 TOOL_AXIS = PLANNED_DOF
 
 #: The rigid-body state q_a(5), q_u(2), dq_a(5), dq_u(2) -- what an OCP built
@@ -51,7 +51,7 @@ class Frame(enum.Enum):
     Model frame; values are the descriptions' own link names.
 
     They do not match the enum's spelling -- TIP is K5_inner_telescope, not
-    K5_tip. Mirrors src/model.cpp:337-348, the only other copy.
+    K5_tip. The enum value is authoritative; nothing else restates the map.
     """
 
     WORLD = "world"

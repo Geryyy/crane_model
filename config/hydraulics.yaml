@@ -1,9 +1,11 @@
 # Constants crane_model needs and the robot description does not carry.
 #
-# Read by the Python `CraneModel` constructor (`crane_model/model.py`) and by
-# `crane_mpc` and `crane_planning`. Units SI.
-# Missing or malformed entry raises `CraneModelError`, never a default: a wrong
-# hydraulic constant is a wrong force limit.
+# Read by the `CraneModel` constructor (`crane_model/model.py`), by
+# `symbolic.py`, `linkage.py` and `mujoco_plant.py`, and by `crane_mpc` and
+# `crane_planning`. Units SI.
+# Missing or malformed entry raises -- `KeyError`/`ValueError` out of the loader
+# naming the key -- never a default: a wrong hydraulic constant is a wrong force
+# limit.
 
 # --- the two constant transmissions ------------------------------------------
 r_gear: 0.1        # slewing rack-and-pinion radius, m
@@ -88,8 +90,8 @@ arm:
 # --- smoothing of constraint 7 ------------------------------------------------
 # Applied to the *model*, never to the inner loop's dead-zone compensator; here
 # so the Python export and the numeric model read one set. Both far below any
-# commanded resolution -- the smoothed Q matches `Model::transmission`'s to
-# under a part in 10^6 once |v| >= 1 mm/s.
+# commanded resolution -- the smoothed Q matches the unsmoothed one to under a
+# part in 10^6 once |v| >= 1 mm/s.
 smoothing:
   eps_abs: 1.0e-6     # |v| ~= sqrt(v^2 + eps^2), m/s
   eps_v: 1.0e-3       # the A^{+-} switch scale, m/s

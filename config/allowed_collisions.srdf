@@ -5,9 +5,8 @@
        pzs100: test/description/pzs100.urdf
      and from the primitive fit that same script produces, which is the
      geometry this list filters. It is not read at runtime, because
-     crane_model is ROS-free and takes no file path, but it is the
-     checked-in artefact, and CraneModelCollision.AllowedPairsAreTheCheckedInList
-     asserts that the table compiled into src/model.cpp is exactly these pairs.
+     crane_model reads config/collision_model.yaml, but it is the
+     checked-in MoveIt spelling of the same list.
 
      Reasons, as the MoveIt format uses them: Adjacent, no third shaped link
      between the two; Never, no sampled configuration brought them together;

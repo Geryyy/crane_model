@@ -2,16 +2,16 @@
 """
 Derive the collision model of `crane_model` from the machine descriptions.
 
-Emits three checked-in artefacts: the primitive table and allowed-pair list of
-`src/collision_model.hpp` on stdout, `config/collision_model.yaml`
-(`--write-yaml`) and `config/allowed_collisions.srdf` (`--write-srdf`). C++ and
-YAML must come out of one run -- `test/test_python_collision.py` compares them.
+Emits the primitive table and allowed-pair list on stdout for reading, and the
+two checked-in artefacts `config/collision_model.yaml` (`--write-yaml`) and
+`config/allowed_collisions.srdf` (`--write-srdf`). Both must come out of one run
+-- `test/test_python_collision.py` reads the YAML.
 
 Runs once, offline, not part of the build: the descriptions name collision
 geometry by `package://` mesh URI and the ROS-free library cannot resolve one at
 runtime. Each entry records the `<collision>` element it was fitted to, so a
 moved origin or swapped mesh shows in the diff of a re-run; nothing asserts it
-today. Queries use the same Coal `src/model.cpp` links.
+today. Queries run Coal over these same links.
 
 Usage:
 
@@ -37,8 +37,8 @@ import coal
 import numpy as np
 
 # Canonical coordinates of the model API. Every other movable joint stays
-# neutral, as `Model::Impl::write_configuration` leaves it: the cylinder
-# sub-chains are loops closed only in Gazebo and carry no collision geometry.
+# neutral, as `Description.configuration` leaves it: the cylinder sub-chains are
+# loops closed only in Gazebo and carry no collision geometry.
 CANONICAL = [
     "theta1_slewing_joint",
     "theta2_boom_joint",
@@ -524,9 +524,8 @@ def srdf(disabled: dict[tuple[str, str], str], sources: list[str]) -> str:
     head += [
         "     and from the primitive fit that same script produces, which is the",
         "     geometry this list filters. It is not read at runtime, because",
-        "     crane_model is ROS-free and takes no file path, but it is the",
-        "     checked-in artefact, and CraneModelCollision.AllowedPairsAreTheCheckedInList",
-        "     asserts that the table compiled into src/model.cpp is exactly these pairs.",
+        "     crane_model reads config/collision_model.yaml, but it is the",
+        "     checked-in MoveIt spelling of the same list.",
         "",
         "     Reasons, as the MoveIt format uses them: Adjacent, no third shaped link",
         "     between the two; Never, no sampled configuration brought them together;",
