@@ -162,10 +162,11 @@ X_COMMAND_LAG = NX_RIGID
 
 # --- the progress pair --------------------------------------------------------
 #
-# `s` is **virtual time** in seconds of nominal plan; `v_s` seconds of plan per
-# second of wall clock, so `v_s = 1` is time-indexed tracking. Time-scaling, not
-# contouring: the reference is a spline in `time_from_start`. The acceleration is
-# the input, so the plan's speed cannot step between cycles. The pair sits
+# `s` is the **path parameter**, in [0, 1] over the planner's curve; `v_s` is its
+# rate, path per second of wall clock. Path following, not time-scaling: the
+# reference `crane_mpc` prices is `c(s)` on that curve, so no timing law lives
+# here. The acceleration is the input, so the pace cannot step between cycles.
+# The pair sits
 # *before* the force state because `v_s >= 0` is a box, the force states
 # deliberately carry none, and acados' `idxbx` is only readable while the boxed
 # rows are a contiguous prefix.
