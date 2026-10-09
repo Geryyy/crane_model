@@ -10,6 +10,16 @@ Two things hold the fit together and nothing else asserts either: the inertials
 in `pzs100_description` and the Coulomb term `symbolic.equations` adds beside
 `damping`. Before 222 the model ran 4.4 % fast and, reading `damping` alone,
 took 45 s to half amplitude against the bags' 33 s -- and never came to rest.
+
+The MuJoCo plant is held to the same fixture, because the symbolic twin passing
+says nothing about it and issue 244 read it as 2-8x over-damped off a probe that
+was wrong twice. Both traps are in the Coulomb term: the envelope is *not* a
+single exponential, so a fitted `tau` is a property of the amplitude and not of
+the model (0.435 rad -> 36 s, 0.033 rad -> 3.4 s on one description), and C3 at
+`u = 0` is not a free decay -- `tau_dot = k*(0 - dq)` makes the five planned
+axes a velocity damper and costs the loaded tip mode 93 s -> 24 s. Measure a
+decay at the bags' amplitude with the planned axes held (`follow`), compare
+half-lives, and never an exponential `tau` across two amplitudes.
 """
 
 import functools
@@ -113,6 +123,44 @@ def _period_and_half_life(times, sway):
 def test_the_free_tip_swing_matches_the_pzs100_bags(q9):
     measured_period, measured_half_life = BAG[q9]
     period, half_life = _period_and_half_life(*_ringdown(q9))
+    assert period == pytest.approx(measured_period, rel=PERIOD_RTOL)
+    assert half_life == pytest.approx(measured_half_life, rel=HALF_LIFE_RTOL)
+
+
+def _mujoco_ringdown(q9, duration=50.0, step=1.0e-3):
+    """`_ringdown` off the MuJoCo plant: same pose, same kick, (t, sway)."""
+    from crane_model.conventions import PASSIVE_INDICES, PLANNED_INDICES
+    from crane_model.mujoco_plant import TOOL_INDEX, MujocoPlant
+
+    plant = MujocoPlant(description(), timestep=step)
+    rest = CraneModel(description(), Tool.PZS100).passive_equilibrium(
+        list(BAG_POSE) + [q9]
+    )
+    q = np.zeros(plant.q.size)
+    q[list(PLANNED_INDICES)] = BAG_POSE
+    q[list(PASSIVE_INDICES)] = rest
+    q[TOOL_INDEX] = q9
+    q[PASSIVE_INDICES[0]] += BAG_AMPLITUDE_RAD
+    plant.set_state(q)
+    # Held, not pinned: writing `qpos` back each step fights the mimic equality
+    # and the model runs away inside 50 ms.
+    held = plant.q[list(PLANNED_INDICES)].copy()
+    still = np.zeros(len(PLANNED_INDICES))
+    tick = 0.01
+    times, sway = [0.0], [BAG_AMPLITUDE_RAD]
+    for index in range(int(duration / tick)):
+        plant.follow(held, still, still, tick)
+        times.append((index + 1) * tick)
+        sway.append(plant.q[PASSIVE_INDICES[0]] - rest[0])
+    return np.array(times), np.array(sway)
+
+
+@pytest.mark.parametrize("q9", sorted(BAG))
+def test_the_mujoco_plants_free_tip_swing_matches_the_pzs100_bags(q9):
+    """The offline plant every MPC number is tuned against, on the same oracle."""
+    pytest.importorskip("mujoco")
+    measured_period, measured_half_life = BAG[q9]
+    period, half_life = _period_and_half_life(*_mujoco_ringdown(q9))
     assert period == pytest.approx(measured_period, rel=PERIOD_RTOL)
     assert half_life == pytest.approx(measured_half_life, rel=HALF_LIFE_RTOL)
 
