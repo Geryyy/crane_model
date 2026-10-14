@@ -13,21 +13,22 @@ the gain that ships. Gains and their provenance: `config/velocity_loop.yaml`.
 (`crane_planning` writes it). Both open-loop branches are added *outside* the
 clamp, exactly as the C++ does: the clamp bounds the PI alone, never the total.
 
-Four deviations from wiki/control_architecture.md 2.1 are reproduced on purpose,
+Four properties of the deployed loop are reproduced on purpose,
 because the deployed loop has them. Do not "fix" them here -- that would leave
 the sim validating a controller nobody runs:
 
 1. `p` == K_I and `d` == K_P. On a velocity command interface int(e_qdot) dt is
-   e_pos, so the position-error gain *is* the integral action. `i` stays 0.
+   e_pos, so the position-error gain *is* the integral action; `i` integrates
+   e_pos once more (a position integral).
 2. the clamp bounds the PI output, not the command.
-3. no anti-windup. At `i == 0` control_toolbox's integral term is identically
-   zero, and the real integral action is `p e_pos` -- a plant state, which
-   cannot be reset, clamped or back-calculated from inside the controller.
+3. no anti-windup. The velocity integral is `p e_pos` -- a plant state, which
+   cannot be reset, clamped or back-calculated from inside the controller; the
+   `i` state runs unclamped.
 4. so an axis held against a stall accumulates e_pos at dq_ref and comes off the
    stall with P at its clamp. That is the failure mode, and it should show here.
 
 Psi is not modelled: it is an input linearization that exists only on the
-machine, assumed exact (wiki/control_architecture.md 119). `u_clamp_*` is still
+machine, assumed exact (wiki/control_architecture.md 1.1). `u_clamp_*` is still
 Psi's identified domain, so it stays -- it is the only bound on the PI branch.
 """
 

@@ -9,13 +9,14 @@
 #
 # Provenance of the gains: wiki/controller_design.md 4.1, one fixed pair per axis,
 # margins held over the whole M_ii range and the worst-case lag/dead-time split.
+# Boom, telescope, rotator hand-tuned on the machine 2026-10-12 (wiki/commissioning.md).
 # u_clamp_* is Psi's identified domain (min_x/max_x of the compensator fit), which
 # is also what crane_planning reads as command_u_min/command_u_max.
 #
 # NAMING TRAP, do not "fix": `p`/`i`/`d` are a velocity PI, not a position PID.
 # On a velocity command interface int(e_qdot) dt == e_pos, so matching
-# K_P e_qdot + K_I int(e_qdot) term by term gives p == K_I and d == K_P.
-# `i` must stay 0 -- it would integrate the position error a second time.
+# K_P e_qdot + K_I int(e_qdot) term by term gives p == K_I and d == K_P: outer
+# position P (p/d) over inner velocity P (d). i > 0 adds a position integral.
 
 # Hz. The ros2_control update rate the gains were designed at.
 rate_hz: 100.0
@@ -40,9 +41,9 @@ gains:
     # [-0.3323,+0.2880]. Hardware runs the 2-D one. Clamp is the intersection --
     # extrapolates neither fit. Do not widen to the 2-D row without the shipped fit.
     ff_velocity_scale: 1.0
-    p: 1.30
-    i: 0.0
-    d: 0.0945
+    p: 0.05  # hand-tuned lab 2026-10-12, design 1.30
+    i: 0.01  # lab, design 0
+    d: 0.1  # lab, design 0.0945
     u_clamp_min: -0.3134   # 1-D fallback, tighter here
     u_clamp_max: 0.2880    # 2-D surface, tighter here
   theta3_arm_joint:
@@ -54,15 +55,15 @@ gains:
     u_clamp_max: 0.3059
   q4_big_telescope:
     ff_velocity_scale: 1.0
-    p: 5.14
+    p: 1.0  # hand-tuned lab 2026-10-12, design 5.14
     i: 0.0
     d: 0.3302
     u_clamp_min: -0.5551
     u_clamp_max: 0.5849
   theta8_rotator_joint:
     ff_velocity_scale: 1.0
-    p: 2.35
-    i: 0.0
+    p: 0.5  # hand-tuned lab 2026-10-12, design 2.35
+    i: 0.01  # lab, design 0
     d: 0.1176
     u_clamp_min: -2.3969
     u_clamp_max: 2.4636
