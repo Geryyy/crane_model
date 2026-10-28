@@ -9,6 +9,7 @@ from .conventions import (
     Tool,
     canonical_joints,
     hydraulic_limits,
+    sway_limits,
 )
 from .description import Description, parse
 from .errors import CraneModelError, ErrorCode
@@ -34,4 +35,5 @@ __all__ = [
     "canonical_joints",
     "hydraulic_limits",
     "parse",
+    "sway_limits",
 ]

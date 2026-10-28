@@ -115,6 +115,13 @@ q_a_margin:
     check: "hand-set with the tool rows above, and carried for shape only --
       crane_planning does not apply it, see the tool note under known_gaps"
 
+# The admissible sway, passive order tip, tilt. The planner clears every path for any swing
+# inside q_sway_max and keeps both rows in its timing; the MPC holds the same box around
+# the hanging pose. Hand-set tolerances, not physical limits: the joints are unactuated.
+sway:
+  q_sway_max: [0.2, 0.2]  # rad from the hanging pose; up = longer moves pass, wider clearance needed
+  dq_sway_max: [1.0, 0.5]  # rad/s
+
 # The one derived row, recorded so the derivation does not get lost.
 derived:
   u_max: "min(psi domain, dq_a_max) per axis. After 128 only the arm is bound by

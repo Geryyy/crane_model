@@ -179,6 +179,21 @@ def control_safe_limits(path: str | None = None) -> dict[str, dict[str, float]]:
     return out
 
 
+def sway_limits(path: str | None = None) -> dict[str, list[float]]:
+    """Read the admissible sway, `q_sway_max` and `dq_sway_max`, tip then tilt."""
+    with open(path or default_control_safe_limits_path(), encoding="utf-8") as handle:
+        sway = yaml.safe_load(handle).get("sway")
+    if not isinstance(sway, dict):
+        raise ValueError("control_safe_limits.yaml carries no sway block")
+    out = {}
+    for name in ("q_sway_max", "dq_sway_max"):
+        row = [float(value) for value in sway[name]]
+        if len(row) != PASSIVE_DOF or not all(value > 0.0 for value in row):
+            raise ValueError(f"control_safe_limits.yaml: sway.{name} is {row}")
+        out[name] = row
+    return out
+
+
 def hydraulic_limits(hydraulics_path: str | None = None) -> dict[str, float]:
     """
     Read the hydraulic constants no description carries.
