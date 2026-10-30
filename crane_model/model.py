@@ -62,6 +62,15 @@ class Payload:
     inertia_k8_kg_m2: np.ndarray = field(default_factory=lambda: np.zeros((3, 3)))
     valid: bool = False
 
+    @staticmethod
+    def box_inertia(mass_kg: float, edges_m) -> np.ndarray:
+        """Uniform box, edges along K8's axes; a point mass unless all edges are positive."""
+        edges = np.asarray(edges_m, dtype=float)
+        if not np.all(np.isfinite(edges) & (edges > 0.0)):
+            return np.zeros((3, 3))
+        squared = edges**2
+        return np.diag(mass_kg / 12.0 * (squared.sum() - squared))
+
 
 def _finite(name: str, value, size: int) -> np.ndarray:
     array = np.asarray(value, dtype=float).reshape(-1)

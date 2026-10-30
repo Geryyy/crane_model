@@ -38,9 +38,9 @@ DT_PI = 0.01
 THETA = cs.ACTUATOR_FIT.dead_time_s + 0.5 * DT_PI
 PM_MIN, GM_MIN = 45.0, 6.0
 NAMES = ("slew", "boom", "arm", "telescope", "rotator")
-# design load: "a concrete block of some 700-800 kg" (ledger 07, issue 067-080);
+# design load: the 0.9x0.6x0.6 m precast block, 880 kg
 # point mass 1 m below the rotator mount (wiki/robot_model.md, r_z ~ +1 m)
-PAYLOADS = (("0", 0.0), ("800 kg", 800.0))
+PAYLOADS = (("0", 0.0), ("880 kg", 880.0))
 TOOL_Q = 0.3
 W = np.logspace(-2, 2.5, 6000)
 
@@ -314,7 +314,7 @@ def write(path, rows, ach, gains, joints):
         f"delay {THETA * 1e3:.0f} ms (C3 60 ms + half a 100 Hz ZOH sample) -> PT1 `tau_v` -> "
         "`tau' = k (u_f - dq)` -> body. Body linearised at the hanging equilibrium, other "
         "planned axes held; **locked** = pendulum rigid (M_ii), **free** = pendulum as the "
-        "OCP models it (rows [i, tip, tilt] of M, dh/dq, dh/ddq). Payload 800 kg point mass "
+        "OCP models it (rows [i, tip, tilt] of M, dh/dq, dh/ddq). Payload 880 kg point mass "
         "1 m below the mount. Pose grid: slew 0, boom 0..1.563 (4), arm -0.91..1.325 (4), "
         "telescope 0..2.236 (3), rotator 0/pi/2 -- 96 poses; min/mid/max by locked M_ii. "
         "Units rad/s (w), kg m^2 or kg (M). `sway` = lowest pendulum mode, actuated locked. "
