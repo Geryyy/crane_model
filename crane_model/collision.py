@@ -290,7 +290,9 @@ def queries(
                 other.pose_in_mounting_base,
                 other.id,
             )
-            for _, shape, pose in (detached if other.attached_to_tool else placed)
+            for link, shape, pose in (detached if other.attached_to_tool else placed)
+            # base vs a static body is constant in q; the outriggers stand on the ground
+            if other.attached_to_tool or link != Frame.MOUNTING_BASE.value
         ]
         if other.attached_to_tool:
             pairs += [

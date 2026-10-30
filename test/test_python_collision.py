@@ -161,7 +161,7 @@ def test_a_restricted_query_splits_the_machine_at_the_upper_hinge():
     q = np.zeros(8)
     q[7] = 0.35
     tcp = model.forward_kinematics(q, Frame.MOUNTING_BASE, Frame.TCP).position_m
-    scene = [box("at_tool", tcp), box("at_base", [0.0, 0.0, -1.5])]
+    scene = [box("at_tool", tcp), box("at_column", [-0.8, 0.0, 0.5])]
     whole = model.collision_queries(q, scene)
     swinging = model.collision_queries(q, scene, swinging=True)
     rigid = model.collision_queries(q, scene, swinging=False)
@@ -212,3 +212,17 @@ def test_the_broad_phase_bound_never_exceeds_the_distance_it_bounds():
         # half-diagonal and bound every other point of the shape.
         for corner in (shape.aabb_local.min_, shape.aabb_local.max_):
             assert radius >= float(np.linalg.norm(np.asarray(corner) - centre)) - 1e-9
+
+
+def test_a_ground_the_base_stands_on_is_measured_from_the_moving_links_only():
+    """The outriggers' box reaches 0.04 m above the ground; a constant row refused every plan."""
+    model = build(Tool.PZS100)
+    q = np.zeros(8)
+    q[1] = 0.8  # boom up, tool clear of the ground
+    ground = CollisionPrimitive(
+        "ground",
+        "box",
+        pin.SE3(np.eye(3), np.array([0.0, 0.0, -1.05])),
+        np.array([40.0, 40.0, 0.1]),
+    )
+    assert model.collision_queries(q, [ground])[0].minimum_distance_m > 1.0
