@@ -113,7 +113,7 @@ joints:
 # passive entries right without a table. A joint listed here overrides that
 # reading, with the reason it does; the model just applies the table.
 # Empty since 2026-09-07: the telescope entry forced d = 0.0 for want of any
-# identified value, but the C3 fit gives 5.640e4 and Marc's stack an
-# independent 5.94e4 (timber_crane_parameter fricLinear[3]), 5 % apart, and the
-# description now carries the fitted number. Reading it is the right answer.
+# identified value, but the C3 fit gives 1.339e5 (Marc's stack has 5.94e4,
+# timber_crane_parameter fricLinear[3]) and the description now carries the
+# fitted number. Reading it is the right answer.
 damping_overrides: []

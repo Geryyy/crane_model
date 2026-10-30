@@ -1,6 +1,6 @@
 {
- "model": "C3 full: tau_dot = k (u - qdot), M_ii(q) qddot = tau - d qdot",
- "identified_on": "HydraulicCalib staircases, velocity response, no pressure channel",
+ "model": "C3 full: u_f_dot = (u(t - T_d) - u_f) / tau_v, tau_dot = k (u_f - qdot), M_ii(q) qddot = tau - d qdot",
+ "identified_on": "HydraulicCalib staircases, velocity response; k_held: k from chamber pressures (ha, ka, ro), geometric prior (sa)",
  "inertia": "pinocchio CRBA on /robot_description from the bags, per-bag median M_ii",
  "dt": 0.01,
  "score": "free",
