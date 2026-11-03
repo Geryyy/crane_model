@@ -313,12 +313,13 @@ class CraneModel:
             scene,
         )
 
-    def collision_queries(self, q, scene, swinging=None) -> list:
+    def collision_queries(self, q, scene, swinging=None, machine=True) -> list:
         """
         One result per scene primitive, in scene order, then one for self.
 
         `swinging=True` checks only the bodies hanging below the tool's upper
         passive hinge, `False` only the rest; either drops the self row.
+        `machine=False` pairs an attached primitive with the scene only.
         """
         q = _finite("q", q, GENERALIZED_DOF)
         return _collision_queries(
@@ -328,6 +329,7 @@ class CraneModel:
             self._description.configuration(q),
             scene,
             swinging,
+            machine,
         )
 
     @staticmethod

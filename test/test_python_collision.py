@@ -13,6 +13,7 @@ from crane_model import (
     ErrorCode,
     Frame,
     Tool,
+    collision,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -152,6 +153,11 @@ def test_a_carried_body_ignores_the_grip_and_still_sees_the_world():
     assert result.other_id == "rock"
     away = box("far_rock", at_tool.translation + np.array([6.0, 0.0, 0.0]), side=0.4)
     assert model.collision_queries(q, [payload(True), away])[0].minimum_distance_m > 0.0
+    # `machine=False`: the scene only, the machine nearer than the far rock drops out
+    with_machine = model.collision_queries(q, [payload(True), away])[0]
+    scene_only = model.collision_queries(q, [payload(True), away], machine=False)[0]
+    assert with_machine.other_id != "far_rock"
+    assert scene_only.other_id == "far_rock"
 
 
 def test_a_restricted_query_splits_the_machine_at_the_upper_hinge():
@@ -176,7 +182,8 @@ def test_the_broad_phase_answers_exactly_what_checking_every_pair_would():
     """Self pairs are culled by a bounding-sphere lower bound -- 49 exact Coal
     queries per configuration reduced to a handful. Inflating the radii makes every
     bound useless and forces the exhaustive path through the same code, so the two
-    answers must agree on the distance *and* on which pair it came from."""
+    answers must agree on the distance *and* on which pair it came from, self row and
+    scene rows alike."""
     model = build(Tool.PZS100)
     geometry = model._link_geometry()
     exact = geometry.bound_radius.copy()
@@ -186,19 +193,34 @@ def test_the_broad_phase_answers_exactly_what_checking_every_pair_would():
     upper = np.array([model._model.upperPositionLimit[j] for j in range(8)])
     lower[~np.isfinite(lower)], upper[~np.isfinite(upper)] = -np.pi, np.pi
 
+    # Scene rows are culled the same way, the carried body's against obstacles too.
+    scene = [
+        box(f"block_{k}", position)
+        for k, position in enumerate(rng.uniform([-8, -8, -2], [8, 8, 3], size=(6, 3)))
+    ] + [
+        CollisionPrimitive(
+            "held", "box", pin.SE3.Identity(), np.ones(3), attached_to_tool=True
+        )
+    ]
+    bound = collision._scene_bound
     checked = 0
     for _ in range(60):
         q = rng.uniform(lower, upper)
-        culled = model.collision_queries(q, [])[-1]
-        geometry.bound_radius = np.full_like(exact, 1.0e6)  # nothing can cull
-        try:
-            exhaustive = model.collision_queries(q, [])[-1]
-        finally:
-            geometry.bound_radius = exact
-        assert culled.minimum_distance_m == exhaustive.minimum_distance_m
-        assert culled.other_id == exhaustive.other_id
-        checked += 1
-    assert checked == 60
+        scene[-1].pose_in_mounting_base = pin.SE3(np.eye(3), rng.uniform(-6, 6, 3))
+        for swinging in (None, True):
+            culled = model.collision_queries(q, scene, swinging)
+            geometry.bound_radius = np.full_like(exact, 1.0e6)  # nothing can cull
+            collision._scene_bound = lambda shape, primitive: (np.zeros(3), 1.0e6)
+            try:
+                exhaustive = model.collision_queries(q, scene, swinging)
+            finally:
+                geometry.bound_radius = exact
+                collision._scene_bound = bound
+            for one, other in zip(culled, exhaustive, strict=True):
+                assert one.minimum_distance_m == other.minimum_distance_m
+                assert one.other_id == other.other_id
+            checked += 1
+    assert checked == 120
 
 
 def test_the_broad_phase_bound_never_exceeds_the_distance_it_bounds():

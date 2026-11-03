@@ -92,6 +92,15 @@ def _scene_geometry(primitive: CollisionPrimitive):
     raise CraneModelError(ErrorCode.INVALID_SCENE, f"unknown shape '{primitive.shape}'")
 
 
+def _scene_bound(shape, primitive: CollisionPrimitive) -> tuple:
+    """Bounding sphere of a scene shape, centre in the mounting base: the scene rows' broad phase."""
+    shape.computeLocalAABB()
+    centre = primitive.pose_in_mounting_base.act(
+        np.asarray(shape.aabb_center, dtype=float)
+    )
+    return centre, float(shape.aabb_radius)
+
+
 def _transform(pose: pin.SE3) -> coal.Transform3s:
     return coal.Transform3s(pose.rotation, pose.translation)
 
@@ -230,7 +239,13 @@ def validate_scene(primitives) -> None:
 
 
 def queries(
-    model, data, geometry: LinkGeometry, configuration, scene, swinging=None
+    model,
+    data,
+    geometry: LinkGeometry,
+    configuration,
+    scene,
+    swinging=None,
+    machine=True,
 ) -> list:
     """
     Check the scene and the machine against itself.
@@ -241,7 +256,8 @@ def queries(
     it (False); such a query answers the scene rows only -- self-collision is
     not split. An `attached_to_tool` primitive is not checked against the links
     holding it (the grip would refuse every pose) and *is* checked against the
-    other scene primitives, which an ordinary scene body never is.
+    other scene primitives, which an ordinary scene body never is; `machine=False`
+    drops its machine pairs, leaving only those.
     """
     validate_scene(scene)
     pin.forwardKinematics(model, data, configuration)
@@ -256,16 +272,17 @@ def queries(
         (link, shape, base.actInv(data.oMf[frame]) * offset)
         for link, frame, shape, offset in geometry.bodies
     ]
-    detached = [placed[index] for index in geometry.detached]
+    chosen = list(range(len(placed)))
+    detached = list(geometry.detached)
     if swinging is not None:
         keep = set(geometry.swinging)
-        chosen = [index for index in range(len(placed)) if (index in keep) == swinging]
-        detached = [placed[index] for index in chosen if index in geometry.detached]
-        placed = [placed[index] for index in chosen]
+        chosen = [index for index in chosen if (index in keep) == swinging]
+        detached = [index for index in chosen if index in geometry.detached]
+    centre = [
+        pose.act(geometry.bounds[index][0]) for index, (_, _, pose) in enumerate(placed)
+    ]
     shapes = {other.id: _scene_geometry(other) for other in scene}
-
-    def closest(candidates):
-        return min(candidates, key=lambda result: result.minimum_distance_m)
+    spheres = {other.id: _scene_bound(shapes[other.id], other) for other in scene}
 
     def closest_bounded(lower, evaluate):
         """`closest` over rows bounded below by `lower`, skipping what cannot win; `lower[k]` must never exceed the distance `evaluate(k)` returns. Cheapest bound first, so the running best tightens early and most rows are never asked of Coal at all; ties break on row order, so the answer is the one exhaustive evaluation would have given."""
@@ -282,41 +299,56 @@ def queries(
 
     results = []
     for other in scene:
-        pairs = [
-            _distance(
-                shape,
-                pose,
-                shapes[other.id],
-                other.pose_in_mounting_base,
-                other.id,
-            )
-            for link, shape, pose in (detached if other.attached_to_tool else placed)
-            # base vs a static body is constant in q; the outriggers stand on the ground
-            if other.attached_to_tool or link != Frame.MOUNTING_BASE.value
-        ]
-        if other.attached_to_tool:
-            pairs += [
-                _distance(
+        middle, reach = spheres[other.id]
+        # (lower bound, exact query) per pair, in the order the exhaustive scan took them
+        rows = [
+            (
+                np.linalg.norm(centre[index] - middle)
+                - geometry.bound_radius[index]
+                - reach,
+                lambda index=index: _distance(
+                    placed[index][1],
+                    placed[index][2],
                     shapes[other.id],
                     other.pose_in_mounting_base,
-                    shapes[obstacle.id],
-                    obstacle.pose_in_mounting_base,
-                    obstacle.id,
+                    other.id,
+                ),
+            )
+            for index in (detached if other.attached_to_tool else chosen)
+            # base vs a static body is constant in q; the outriggers stand on the ground
+            if (other.attached_to_tool and machine)
+            or (
+                not other.attached_to_tool
+                and placed[index][0] != Frame.MOUNTING_BASE.value
+            )
+        ]
+        if other.attached_to_tool:
+            rows += [
+                (
+                    np.linalg.norm(spheres[obstacle.id][0] - middle)
+                    - spheres[obstacle.id][1]
+                    - reach,
+                    lambda obstacle=obstacle: _distance(
+                        shapes[other.id],
+                        other.pose_in_mounting_base,
+                        shapes[obstacle.id],
+                        obstacle.pose_in_mounting_base,
+                        obstacle.id,
+                    ),
                 )
                 for obstacle in scene
                 if obstacle.id != other.id and not obstacle.attached_to_tool
             ]
-        if pairs:
-            results.append(closest(pairs))
+        if rows:
+            results.append(
+                closest_bounded(
+                    np.array([row[0] for row in rows]), lambda k: rows[k][1]()
+                )
+            )
     if geometry.self_pairs and swinging is None:
         # Self pairs are the whole cost on an empty scene -- 49 exact queries per
         # configuration, reduced to one minimum. Bound them first.
-        centre = np.array(
-            [
-                pose.act(geometry.bounds[index][0])
-                for index, (_, _, pose) in enumerate(placed)
-            ]
-        )
+        centre = np.array(centre)
         first, second = geometry.self_pair_index
         radius = geometry.bound_radius
         lower = np.linalg.norm(centre[first] - centre[second], axis=1) - (
